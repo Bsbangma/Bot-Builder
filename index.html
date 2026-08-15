@@ -119,6 +119,18 @@ const FTCRobotConfigurator = () => {
   // Servo Controls (map servo name to control config)
   const [servoControls, setServoControls] = React.useState({});
 
+  // Telemetry Configuration
+  const [telemetryHeading, setTelemetryHeading] = React.useState(true);
+  const [telemetryAprilTag, setTelemetryAprilTag] = React.useState(false);
+  const [telemetryDriveMotors, setTelemetryDriveMotors] = React.useState(false);
+  const [telemetryAuxMotors, setTelemetryAuxMotors] = React.useState(true);
+  const [telemetryServos, setTelemetryServos] = React.useState(true);
+  const [telemetryDistanceSensors, setTelemetryDistanceSensors] = React.useState(false);
+  const [telemetryColorSensors, setTelemetryColorSensors] = React.useState(false);
+  const [telemetryBattery, setTelemetryBattery] = React.useState(false);
+  const [telemetryLoopTime, setTelemetryLoopTime] = React.useState(false);
+  const [telemetryAlerts, setTelemetryAlerts] = React.useState(false);
+
   // Load saved configs on mount
   React.useEffect(() => {
     const saved = localStorage.getItem('ftc_robot_configs');
@@ -403,7 +415,10 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, motorControls, servoControls
+      slowModeButton, slowModeSpeed, motorControls, servoControls,
+      telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
+      telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
+      telemetryBattery, telemetryLoopTime, telemetryAlerts
     };
     
     const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
@@ -469,6 +484,16 @@ const FTCRobotConfigurator = () => {
     setSlowModeSpeed(config.slowModeSpeed || 0.4);
     setMotorControls(config.motorControls || {});
     setServoControls(config.servoControls || {});
+    setTelemetryHeading(config.telemetryHeading !== undefined ? config.telemetryHeading : true);
+    setTelemetryAprilTag(config.telemetryAprilTag || false);
+    setTelemetryDriveMotors(config.telemetryDriveMotors || false);
+    setTelemetryAuxMotors(config.telemetryAuxMotors !== undefined ? config.telemetryAuxMotors : true);
+    setTelemetryServos(config.telemetryServos !== undefined ? config.telemetryServos : true);
+    setTelemetryDistanceSensors(config.telemetryDistanceSensors || false);
+    setTelemetryColorSensors(config.telemetryColorSensors || false);
+    setTelemetryBattery(config.telemetryBattery || false);
+    setTelemetryLoopTime(config.telemetryLoopTime || false);
+    setTelemetryAlerts(config.telemetryAlerts || false);
     setShowLoadModal(false);
   };
 
@@ -484,7 +509,7 @@ const FTCRobotConfigurator = () => {
     const config = {
       name: robotName,
       exportedAt: new Date().toISOString(),
-      version: '3.0',
+      version: '4.0',
       robotLength, robotWidth,
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
@@ -496,7 +521,10 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, motorControls, servoControls
+      slowModeButton, slowModeSpeed, motorControls, servoControls,
+      telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
+      telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
+      telemetryBattery, telemetryLoopTime, telemetryAlerts
     };
     
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
@@ -816,6 +844,7 @@ import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+${telemetryLoopTime ? `import com.qualcomm.robotcore.util.ElapsedTime;` : ''}
 
 @TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
 public class ${robotName.replace(/\s+/g, '')}TeleOp extends LinearOpMode {
@@ -838,6 +867,9 @@ ${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toU
 
     // Field-oriented driving
     private double headingOffset = 0;
+${telemetryLoopTime ? `
+    // Loop timer
+    private ElapsedTime loopTimer = new ElapsedTime();` : ''}
 
 ${toggleMotors.length > 0 ? `    // Motor toggle states
 ${toggleMotors.map(m => `    private boolean ${m.name}Running = false;
@@ -925,10 +957,21 @@ ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
 
-            // Telemetry
-            telemetry.addData("Heading", "%.1f°", Math.toDegrees(heading));
-${auxMotors.length > 0 ? auxMotors.map(m => `            telemetry.addData("${m.name}", "%.2f", ${m.name}.getPower());`).join('\n') : ''}
-${servos.length > 0 ? servos.map(s => `            telemetry.addData("${s.name}", "%.2f", ${s.name}.getPosition());`).join('\n') : ''}
+            // === TELEMETRY ===
+${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
+${telemetryAprilTag ? `            // AprilTag telemetry would go here (requires Limelight integration)
+            telemetry.addData("Tag", "N/A");` : ''}
+${telemetryDriveMotors ? `            telemetry.addData("Drive", "FL:%.2f FR:%.2f BL:%.2f BR:%.2f", 
+                frontLeft.getPower(), frontRight.getPower(), backLeft.getPower(), backRight.getPower());` : ''}
+${telemetryAuxMotors && auxMotors.length > 0 ? `            telemetry.addData("Motors", "${auxMotors.map(m => `${m.name}:%.2f`).join(' | ')}", ${auxMotors.map(m => `${m.name}.getPower()`).join(', ')});` : ''}
+${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${s.name}.getPosition()`).join(', ')});` : ''}
+${telemetryBattery ? `            telemetry.addData("Batt", "%.1fV", hardwareMap.voltageSensor.iterator().next().getVoltage());` : ''}
+${telemetryLoopTime ? `            telemetry.addData("Loop", "%dms", (int)(loopTimer.milliseconds()));
+            loopTimer.reset();` : ''}
+${telemetryAlerts ? `            // Alerts
+            if (hardwareMap.voltageSensor.iterator().next().getVoltage() < 11.5) {
+                telemetry.addLine("⚠️ LOW BATTERY");
+            }` : ''}
             telemetry.update();
         }
     }
@@ -2482,6 +2525,193 @@ Make sure your code initializes the IMU with these orientations!
           </div>
         );
 
+      case 'telemetry':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Telemetry Display</h3>
+            <p className="text-gray-400 text-sm">Choose what data to show on the Driver Station screen. Uses compact single-line format to fit more info without scrolling.</p>
+
+            {/* Position Section */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Position & Navigation</h4>
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryHeading}
+                    onChange={(e) => setTelemetryHeading(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Heading (IMU)</span>
+                    <span className="text-gray-400 text-sm ml-2">→ H: 45.0°</span>
+                  </div>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryAprilTag}
+                    onChange={(e) => setTelemetryAprilTag(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">AprilTag Detection</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Tag: #21 @ 18.3"</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Motors Section */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-orange-400 mb-3">Motors</h4>
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryDriveMotors}
+                    onChange={(e) => setTelemetryDriveMotors(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Drive Motor Powers</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Drive: FL:0.50 FR:0.50 BL:0.50 BR:0.50</span>
+                  </div>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryAuxMotors}
+                    onChange={(e) => setTelemetryAuxMotors(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Auxiliary Motor Powers</span>
+                    <span className="text-gray-400 text-sm ml-2">→ intake: 1.00 | arm: 0.75</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Servos Section */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-purple-400 mb-3">Servos</h4>
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryServos}
+                    onChange={(e) => setTelemetryServos(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Servo Positions</span>
+                    <span className="text-gray-400 text-sm ml-2">→ claw: 0.70 | wrist: 0.30</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Sensors Section */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-cyan-400 mb-3">Sensors</h4>
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryDistanceSensors}
+                    onChange={(e) => setTelemetryDistanceSensors(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Distance Sensors</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Dist: front:12.5" side:8.2"</span>
+                  </div>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryColorSensors}
+                    onChange={(e) => setTelemetryColorSensors(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Color Sensors</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Color: R:128 G:64 B:200</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* System Section */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-yellow-400 mb-3">System</h4>
+              <div className="space-y-2">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryBattery}
+                    onChange={(e) => setTelemetryBattery(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Battery Voltage</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Batt: 12.8V</span>
+                  </div>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryLoopTime}
+                    onChange={(e) => setTelemetryLoopTime(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Loop Time</span>
+                    <span className="text-gray-400 text-sm ml-2">→ Loop: 20ms</span>
+                  </div>
+                </label>
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={telemetryAlerts}
+                    onChange={(e) => setTelemetryAlerts(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <div>
+                    <span className="text-white">Alerts & Warnings</span>
+                    <span className="text-gray-400 text-sm ml-2">→ ⚠️ NO TAG VISIBLE</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {/* Preview */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-green-400 mb-3">Preview</h4>
+              <div className="bg-gray-900 p-3 rounded font-mono text-sm text-green-300">
+                {telemetryHeading && <div>H: 45.0°</div>}
+                {telemetryAprilTag && <div>Tag: #21 @ 18.3"</div>}
+                {telemetryDriveMotors && <div>Drive: FL:0.50 FR:0.50 BL:0.50 BR:0.50</div>}
+                {telemetryAuxMotors && auxMotors.length > 0 && (
+                  <div>{auxMotors.map(m => `${m.name}: 0.00`).join(' | ')}</div>
+                )}
+                {telemetryServos && servos.length > 0 && (
+                  <div>{servos.map(s => `${s.name}: 0.00`).join(' | ')}</div>
+                )}
+                {telemetryDistanceSensors && <div>Dist: front:12.5" side:8.2"</div>}
+                {telemetryColorSensors && <div>Color: R:128 G:64 B:200</div>}
+                {telemetryBattery && <div>Batt: 12.8V</div>}
+                {telemetryLoopTime && <div>Loop: 20ms</div>}
+                {telemetryAlerts && <div className="text-yellow-400">⚠️ LOW BATTERY</div>}
+                {!telemetryHeading && !telemetryAprilTag && !telemetryDriveMotors && !telemetryAuxMotors && !telemetryServos && !telemetryDistanceSensors && !telemetryColorSensors && !telemetryBattery && !telemetryLoopTime && !telemetryAlerts && (
+                  <div className="text-gray-500">No telemetry selected</div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+
       case 'output':
         const currentCode = codeOutputMode === 'teleop' ? generateCompleteTeleOp() : generateCodeSnippet();
         return (
@@ -3250,6 +3480,7 @@ Make sure your code initializes the IMU with these orientations!
               { id: 'blinkin', label: 'LEDs' },
               { id: 'ports', label: 'Ports' },
               { id: 'controls', label: 'Controls' },
+              { id: 'telemetry', label: 'Telemetry' },
               { id: 'output', label: 'Code' },
               { id: 'driverstation', label: 'DS' }
             ].map((tab) => (
