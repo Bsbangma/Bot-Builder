@@ -131,6 +131,11 @@ const FTCRobotConfigurator = () => {
   const [telemetryLoopTime, setTelemetryLoopTime] = React.useState(false);
   const [telemetryAlerts, setTelemetryAlerts] = React.useState(false);
 
+  // Macros Configuration
+  const [macros, setMacros] = React.useState([]);
+  const [editingMacroId, setEditingMacroId] = React.useState(null);
+  const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
+
   // Load saved configs on mount
   React.useEffect(() => {
     const saved = localStorage.getItem('ftc_robot_configs');
@@ -418,7 +423,8 @@ const FTCRobotConfigurator = () => {
       slowModeButton, slowModeSpeed, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
-      telemetryBattery, telemetryLoopTime, telemetryAlerts
+      telemetryBattery, telemetryLoopTime, telemetryAlerts,
+      macros, defaultTolerance
     };
     
     const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
@@ -494,6 +500,8 @@ const FTCRobotConfigurator = () => {
     setTelemetryBattery(config.telemetryBattery || false);
     setTelemetryLoopTime(config.telemetryLoopTime || false);
     setTelemetryAlerts(config.telemetryAlerts || false);
+    setMacros(config.macros || []);
+    setDefaultTolerance(config.defaultTolerance || 1.0);
     setShowLoadModal(false);
   };
 
@@ -524,7 +532,8 @@ const FTCRobotConfigurator = () => {
       slowModeButton, slowModeSpeed, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
-      telemetryBattery, telemetryLoopTime, telemetryAlerts
+      telemetryBattery, telemetryLoopTime, telemetryAlerts,
+      macros, defaultTolerance
     };
     
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
@@ -2525,6 +2534,545 @@ Make sure your code initializes the IMU with these orientations!
           </div>
         );
 
+      case 'macros':
+        const triggerButtonOptions = [
+          { value: 'a', label: 'A' },
+          { value: 'b', label: 'B' },
+          { value: 'x', label: 'X' },
+          { value: 'y', label: 'Y' },
+          { value: 'left_bumper', label: 'LB' },
+          { value: 'right_bumper', label: 'RB' },
+          { value: 'dpad_up', label: 'D-Pad Up' },
+          { value: 'dpad_down', label: 'D-Pad Down' },
+          { value: 'dpad_left', label: 'D-Pad Left' },
+          { value: 'dpad_right', label: 'D-Pad Right' }
+        ];
+
+        const actionTypes = [
+          { value: 'drive_to_tag', label: '🎯 Drive to AprilTag', icon: '🎯' },
+          { value: 'motor_position', label: '⚙️ Move Motor to Position', icon: '⚙️' },
+          { value: 'motor_time', label: '🔄 Run Motor for Time', icon: '🔄' },
+          { value: 'servo_position', label: '🦾 Set Servo Position', icon: '🦾' },
+          { value: 'wait', label: '⏱️ Wait', icon: '⏱️' },
+          { value: 'led_pattern', label: '💡 Set LED Pattern', icon: '💡' }
+        ];
+
+        const createNewMacro = () => {
+          const newId = macros.length > 0 ? Math.max(...macros.map(m => m.id)) + 1 : 1;
+          const newMacro = {
+            id: newId,
+            name: `Macro ${newId}`,
+            triggerType: 'button',
+            triggerButton: 'a',
+            triggerCombo: null,
+            triggerController: 'gamepad2',
+            behavior: 'press', // 'press' or 'hold'
+            steps: []
+          };
+          setMacros([...macros, newMacro]);
+          setEditingMacroId(newId);
+        };
+
+        const updateMacro = (macroId, field, value) => {
+          setMacros(macros.map(m => m.id === macroId ? { ...m, [field]: value } : m));
+        };
+
+        const deleteMacro = (macroId) => {
+          setMacros(macros.filter(m => m.id !== macroId));
+          if (editingMacroId === macroId) setEditingMacroId(null);
+        };
+
+        const addStep = (macroId) => {
+          const macro = macros.find(m => m.id === macroId);
+          if (!macro) return;
+          const newStepId = macro.steps.length > 0 ? Math.max(...macro.steps.map(s => s.id)) + 1 : 1;
+          const newStep = {
+            id: newStepId,
+            type: 'wait',
+            // Common fields
+            duration: 0.5,
+            // Drive to tag fields
+            tagId: 21,
+            distance: 24,
+            offset: 0,
+            tolerance: defaultTolerance,
+            // Motor fields
+            motorName: auxMotors.length > 0 ? auxMotors[0].name : '',
+            motorPosition: 0,
+            motorPower: 0.8,
+            motorDuration: 1.0,
+            // Servo fields
+            servoName: servos.length > 0 ? servos[0].name : '',
+            servoPosition: 0.5,
+            // LED fields
+            ledPattern: blinkinPatterns.length > 0 ? blinkinPatterns[0].name : 'default'
+          };
+          updateMacro(macroId, 'steps', [...macro.steps, newStep]);
+        };
+
+        const updateStep = (macroId, stepId, field, value) => {
+          const macro = macros.find(m => m.id === macroId);
+          if (!macro) return;
+          const updatedSteps = macro.steps.map(s => s.id === stepId ? { ...s, [field]: value } : s);
+          updateMacro(macroId, 'steps', updatedSteps);
+        };
+
+        const deleteStep = (macroId, stepId) => {
+          const macro = macros.find(m => m.id === macroId);
+          if (!macro) return;
+          updateMacro(macroId, 'steps', macro.steps.filter(s => s.id !== stepId));
+        };
+
+        const moveStep = (macroId, stepId, direction) => {
+          const macro = macros.find(m => m.id === macroId);
+          if (!macro) return;
+          const idx = macro.steps.findIndex(s => s.id === stepId);
+          if (idx === -1) return;
+          if (direction === 'up' && idx > 0) {
+            const newSteps = [...macro.steps];
+            [newSteps[idx - 1], newSteps[idx]] = [newSteps[idx], newSteps[idx - 1]];
+            updateMacro(macroId, 'steps', newSteps);
+          } else if (direction === 'down' && idx < macro.steps.length - 1) {
+            const newSteps = [...macro.steps];
+            [newSteps[idx], newSteps[idx + 1]] = [newSteps[idx + 1], newSteps[idx]];
+            updateMacro(macroId, 'steps', newSteps);
+          }
+        };
+
+        const editingMacro = macros.find(m => m.id === editingMacroId);
+
+        const renderStepConfig = (macro, step) => {
+          switch (step.type) {
+            case 'drive_to_tag':
+              return (
+                <div className="grid grid-cols-4 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Tag ID</label>
+                    <input
+                      type="number"
+                      value={step.tagId}
+                      onChange={(e) => updateStep(macro.id, step.id, 'tagId', parseInt(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Distance (in)</label>
+                    <input
+                      type="number"
+                      value={step.distance}
+                      onChange={(e) => updateStep(macro.id, step.id, 'distance', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Offset (- left, + right)</label>
+                    <input
+                      type="number"
+                      value={step.offset}
+                      onChange={(e) => updateStep(macro.id, step.id, 'offset', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Tolerance (in)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={step.tolerance}
+                      onChange={(e) => updateStep(macro.id, step.id, 'tolerance', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'motor_position':
+              return (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Position (ticks)</label>
+                    <input
+                      type="number"
+                      value={step.motorPosition}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorPosition', parseInt(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1.0"
+                      step="0.1"
+                      value={step.motorPower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'motor_time':
+              return (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Duration (sec)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={step.motorDuration}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorDuration', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power (- reverse)</label>
+                    <input
+                      type="number"
+                      min="-1.0"
+                      max="1.0"
+                      step="0.1"
+                      value={step.motorPower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'servo_position':
+              return (
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Servo</label>
+                    <select
+                      value={step.servoName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'servoName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {servos.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Position (0-1)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={step.servoPosition}
+                      onChange={(e) => updateStep(macro.id, step.id, 'servoPosition', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'wait':
+              return (
+                <div className="grid grid-cols-1 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Duration (sec)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={step.duration}
+                      onChange={(e) => updateStep(macro.id, step.id, 'duration', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'led_pattern':
+              return (
+                <div className="grid grid-cols-1 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Pattern</label>
+                    <select
+                      value={step.ledPattern}
+                      onChange={(e) => updateStep(macro.id, step.id, 'ledPattern', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {blinkinPatterns.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              );
+            default:
+              return null;
+          }
+        };
+
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Macros</h3>
+              <button
+                onClick={createNewMacro}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+              >
+                + Add Macro
+              </button>
+            </div>
+
+            <p className="text-gray-400 text-sm">
+              Create automated sequences. Press START to cancel any running macro.
+            </p>
+
+            {/* Macro List */}
+            {macros.length === 0 ? (
+              <div className="bg-gray-700 p-6 rounded-lg text-center">
+                <p className="text-gray-400">No macros configured.</p>
+                <p className="text-gray-500 text-sm mt-2">Click "+ Add Macro" to create an automated sequence.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {macros.map(macro => (
+                  <div
+                    key={macro.id}
+                    className={`bg-gray-700 p-3 rounded-lg cursor-pointer border-2 ${editingMacroId === macro.id ? 'border-green-500' : 'border-transparent'}`}
+                    onClick={() => setEditingMacroId(macro.id)}
+                  >
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xl">📦</span>
+                        <span className="text-white font-semibold">{macro.name}</span>
+                        <span className="text-gray-400 text-sm">
+                          ({macro.behavior === 'hold' ? 'Hold' : 'Press'} {triggerButtonOptions.find(b => b.value === macro.triggerButton)?.label})
+                        </span>
+                      </div>
+                      <div className="flex gap-2">
+                        <span className="text-gray-400 text-sm">{macro.steps.length} steps</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteMacro(macro.id); }}
+                          className="text-red-400 hover:text-red-300 text-sm"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Macro Editor */}
+            {editingMacro && (
+              <div className="bg-gray-800 p-4 rounded-lg border border-gray-600">
+                <h4 className="text-lg font-semibold text-blue-400 mb-4">Editing: {editingMacro.name}</h4>
+
+                {/* Macro Name */}
+                <div className="mb-4">
+                  <label className="block text-sm text-gray-400 mb-1">Macro Name</label>
+                  <input
+                    type="text"
+                    value={editingMacro.name}
+                    onChange={(e) => updateMacro(editingMacro.id, 'name', e.target.value)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                  />
+                </div>
+
+                {/* Trigger Config */}
+                <div className="bg-gray-700 p-3 rounded-lg mb-4">
+                  <h5 className="text-sm font-semibold text-gray-300 mb-2">Trigger</h5>
+                  <div className="grid grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">Type</label>
+                      <select
+                        value={editingMacro.triggerType}
+                        onChange={(e) => updateMacro(editingMacro.id, 'triggerType', e.target.value)}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      >
+                        <option value="button">Button</option>
+                        <option value="combo">Button Combo</option>
+                        <option value="sensor">Sensor Condition</option>
+                        <option value="tag_visible">AprilTag Visible</option>
+                      </select>
+                    </div>
+                    {editingMacro.triggerType === 'button' && (
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Button</label>
+                        <select
+                          value={editingMacro.triggerButton}
+                          onChange={(e) => updateMacro(editingMacro.id, 'triggerButton', e.target.value)}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          {triggerButtonOptions.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    {editingMacro.triggerType === 'combo' && (
+                      <>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Hold Button</label>
+                          <select
+                            value={editingMacro.triggerCombo || 'left_bumper'}
+                            onChange={(e) => updateMacro(editingMacro.id, 'triggerCombo', e.target.value)}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            <option value="left_bumper">LB</option>
+                            <option value="right_bumper">RB</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">+ Press</label>
+                          <select
+                            value={editingMacro.triggerButton}
+                            onChange={(e) => updateMacro(editingMacro.id, 'triggerButton', e.target.value)}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            {triggerButtonOptions.filter(b => !b.value.includes('bumper')).map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+                          </select>
+                        </div>
+                      </>
+                    )}
+                    {editingMacro.triggerType === 'tag_visible' && (
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Tag ID</label>
+                        <input
+                          type="number"
+                          value={editingMacro.triggerTagId || 21}
+                          onChange={(e) => updateMacro(editingMacro.id, 'triggerTagId', parseInt(e.target.value))}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">Controller</label>
+                      <select
+                        value={editingMacro.triggerController}
+                        onChange={(e) => updateMacro(editingMacro.id, 'triggerController', e.target.value)}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      >
+                        <option value="gamepad1">Gamepad 1</option>
+                        <option value="gamepad2">Gamepad 2</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">Behavior</label>
+                      <select
+                        value={editingMacro.behavior}
+                        onChange={(e) => updateMacro(editingMacro.id, 'behavior', e.target.value)}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      >
+                        <option value="press">Press (run to completion)</option>
+                        <option value="hold">Hold (release to stop)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Steps */}
+                <div className="bg-gray-700 p-3 rounded-lg">
+                  <div className="flex justify-between items-center mb-2">
+                    <h5 className="text-sm font-semibold text-gray-300">Steps</h5>
+                    <button
+                      onClick={() => addStep(editingMacro.id)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs"
+                    >
+                      + Add Step
+                    </button>
+                  </div>
+
+                  {editingMacro.steps.length === 0 ? (
+                    <p className="text-gray-400 text-sm text-center py-4">No steps yet. Click "+ Add Step" to begin.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {editingMacro.steps.map((step, idx) => (
+                        <div key={step.id} className="bg-gray-800 p-2 rounded">
+                          <div className="flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-400 text-sm">{idx + 1}.</span>
+                              <span className="text-lg">{actionTypes.find(a => a.value === step.type)?.icon}</span>
+                              <select
+                                value={step.type}
+                                onChange={(e) => updateStep(editingMacro.id, step.id, 'type', e.target.value)}
+                                className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                              >
+                                {actionTypes.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                              </select>
+                            </div>
+                            <div className="flex gap-1">
+                              <button
+                                onClick={() => moveStep(editingMacro.id, step.id, 'up')}
+                                disabled={idx === 0}
+                                className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                onClick={() => moveStep(editingMacro.id, step.id, 'down')}
+                                disabled={idx === editingMacro.steps.length - 1}
+                                className="text-gray-400 hover:text-white disabled:opacity-30 px-1"
+                              >
+                                ▼
+                              </button>
+                              <button
+                                onClick={() => deleteStep(editingMacro.id, step.id)}
+                                className="text-red-400 hover:text-red-300 px-1"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                          {renderStepConfig(editingMacro, step)}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Summary */}
+                {editingMacro.steps.length > 0 && (
+                  <div className="mt-4 p-3 bg-gray-900 rounded text-sm text-gray-300">
+                    <strong className="text-green-400">Summary:</strong> {editingMacro.behavior === 'hold' ? 'Hold' : 'Press'} {triggerButtonOptions.find(b => b.value === editingMacro.triggerButton)?.label} on {editingMacro.triggerController} →{' '}
+                    {editingMacro.steps.map((s, i) => (
+                      <span key={s.id}>
+                        {actionTypes.find(a => a.value === s.type)?.icon}
+                        {i < editingMacro.steps.length - 1 ? ' → ' : ''}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Default Tolerance Setting */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-sm font-semibold text-gray-300 mb-2">Default Settings</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Default Tolerance (inches)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={defaultTolerance}
+                    onChange={(e) => setDefaultTolerance(parseFloat(e.target.value))}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
       case 'telemetry':
         return (
           <div className="space-y-6">
@@ -3480,6 +4028,7 @@ Make sure your code initializes the IMU with these orientations!
               { id: 'blinkin', label: 'LEDs' },
               { id: 'ports', label: 'Ports' },
               { id: 'controls', label: 'Controls' },
+              { id: 'macros', label: 'Macros' },
               { id: 'telemetry', label: 'Telemetry' },
               { id: 'output', label: 'Code' },
               { id: 'driverstation', label: 'DS' }
