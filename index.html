@@ -848,12 +848,13 @@ ${sensors.map(s => {
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.IMU;
+import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
-${telemetryLoopTime ? `import com.qualcomm.robotcore.util.ElapsedTime;` : ''}
 
 @TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
 public class ${robotName.replace(/\s+/g, '')}TeleOp extends LinearOpMode {
@@ -861,8 +862,8 @@ public class ${robotName.replace(/\s+/g, '')}TeleOp extends LinearOpMode {
     // Drive Motors
 ${motors.map(m => `    private DcMotor ${m.name};`).join('\n')}
 
-${auxMotors.length > 0 ? `    // Auxiliary Motors
-${auxMotors.map(m => `    private DcMotor ${m.name};`).join('\n')}` : ''}
+${auxMotors.length > 0 ? `    // Auxiliary Motors (DcMotorEx for velocity)
+${auxMotors.map(m => `    private DcMotorEx ${m.name};`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `    // Servos
 ${servos.map(s => `    private Servo ${s.name};`).join('\n')}` : ''}
@@ -876,9 +877,10 @@ ${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toU
 
     // Field-oriented driving
     private double headingOffset = 0;
-${telemetryLoopTime ? `
-    // Loop timer
-    private ElapsedTime loopTimer = new ElapsedTime();` : ''}
+
+    // Timers
+    private ElapsedTime loopTimer = new ElapsedTime();
+    private ElapsedTime macroTimer = new ElapsedTime();
 
 ${toggleMotors.length > 0 ? `    // Motor toggle states
 ${toggleMotors.map(m => `    private boolean ${m.name}Running = false;
@@ -888,15 +890,31 @@ ${toggleServos.length > 0 ? `    // Servo toggle states
 ${toggleServos.map(s => `    private boolean ${s.name}Open = false;
     private boolean ${s.name}ButtonPrev = false;`).join('\n')}` : ''}
 
+${macros.length > 0 ? `    // Macro states
+    private int activeMacro = -1;  // -1 = no macro running
+    private int macroStep = 0;
+    private boolean macroStepStarted = false;
+${macros.map((m, i) => `    private boolean macro${i}ButtonPrev = false;`).join('\n')}
+
+    // Odometry constants (using configured pods)
+    private static final double TICKS_PER_INCH = ${(() => {
+      const pod = odoDatabase[odo1Type];
+      if (pod) {
+        return ((pod.cpr / (pod.wheelDiameter * Math.PI)) * 25.4).toFixed(1);
+      }
+      return '505.2';
+    })()};` : ''}
+
     @Override
     public void runOpMode() {
         // Initialize drive motors
 ${motors.map(m => `        ${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
         ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}
 
-${auxMotors.length > 0 ? `        // Initialize auxiliary motors
-${auxMotors.map(m => `        ${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
-        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}` : ''}
+${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx for velocity)
+${auxMotors.map(m => `        ${m.name} = hardwareMap.get(DcMotorEx.class, "${m.name}");
+        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+        ${m.name}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
 ${servos.map(s => `        ${s.name} = hardwareMap.get(Servo.class, "${s.name}");`).join('\n')}` : ''}
@@ -912,12 +930,273 @@ ${hasBlinkin ? `        // Initialize Blinkin
         blinkin.setPosition(BLINKIN_${(blinkinPatterns[0]?.name || 'DEFAULT').toUpperCase().replace(/\s+/g, '_')});` : ''}
 
         telemetry.addLine("${robotName} Ready!");
+${macros.length > 0 ? `        telemetry.addLine("Macros: ${macros.length} configured");` : ''}
         telemetry.update();
 
         waitForStart();
+        loopTimer.reset();
 
         while (opModeIsActive()) {
-            // === DRIVE CONTROLS ===
+${macros.length > 0 ? `            // === MACRO CANCEL (START button) ===
+            if (gamepad1.start || gamepad2.start) {
+                if (activeMacro != -1) {
+                    activeMacro = -1;
+                    macroStep = 0;
+                    macroStepStarted = false;
+                    // Stop all motors when canceling
+                    ${auxMotors.map(m => `${m.name}.setPower(0);`).join('\n                    ')}
+                }
+            }
+
+            // === MACRO TRIGGERS ===
+            if (activeMacro == -1) {
+${macros.map((macro, i) => {
+  const gp = macro.triggerController;
+  let triggerCondition = '';
+  let buttonPrevCheck = '';
+  
+  if (macro.triggerType === 'button') {
+    const btn = getButtonCode(macro.triggerButton, gp);
+    if (macro.behavior === 'press') {
+      triggerCondition = `${btn} && !macro${i}ButtonPrev`;
+      buttonPrevCheck = `                macro${i}ButtonPrev = ${btn};`;
+    } else {
+      triggerCondition = btn;
+    }
+  } else if (macro.triggerType === 'combo') {
+    const holdBtn = getButtonCode(macro.triggerCombo || 'left_bumper', gp);
+    const pressBtn = getButtonCode(macro.triggerButton, gp);
+    if (macro.behavior === 'press') {
+      triggerCondition = `${holdBtn} && ${pressBtn} && !macro${i}ButtonPrev`;
+      buttonPrevCheck = `                macro${i}ButtonPrev = ${pressBtn};`;
+    } else {
+      triggerCondition = `${holdBtn} && ${pressBtn}`;
+    }
+  } else if (macro.triggerType === 'velocity_above') {
+    triggerCondition = `((DcMotorEx)${macro.triggerMotor || auxMotors[0]?.name || 'motor'}).getVelocity() >= ${macro.triggerVelocity || 1000}`;
+  } else if (macro.triggerType === 'velocity_below') {
+    triggerCondition = `((DcMotorEx)${macro.triggerMotor || auxMotors[0]?.name || 'motor'}).getVelocity() <= ${macro.triggerVelocity || 1000}`;
+  } else if (macro.triggerType === 'tag_visible') {
+    triggerCondition = `false /* AprilTag ${macro.triggerTagId || 21} visible - requires Limelight */`;
+  }
+  
+  return `                // Macro: ${macro.name}
+                if (${triggerCondition}) {
+                    activeMacro = ${i};
+                    macroStep = 0;
+                    macroStepStarted = false;
+                    macroTimer.reset();
+                }
+${buttonPrevCheck}`;
+}).join('\n')}
+            }
+
+            // === MACRO EXECUTION ===
+${macros.map((macro, i) => {
+  if (macro.steps.length === 0) return '';
+  
+  let macroCode = `            if (activeMacro == ${i}) {
+                // ${macro.name}
+${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerType === 'combo') ? 
+`                // Hold behavior - check if button released
+                if (!${macro.triggerType === 'combo' ? 
+  `(${getButtonCode(macro.triggerCombo || 'left_bumper', macro.triggerController)} && ${getButtonCode(macro.triggerButton, macro.triggerController)})` : 
+  getButtonCode(macro.triggerButton, macro.triggerController)}) {
+                    activeMacro = -1;
+                    macroStep = 0;
+                    ${auxMotors.map(m => `${m.name}.setPower(0);`).join('\n                    ')}
+                } else ` : '                '}switch (macroStep) {
+`;
+
+  macro.steps.forEach((step, stepIdx) => {
+    macroCode += `                    case ${stepIdx}: // ${step.type}
+`;
+    
+    switch (step.type) {
+      case 'wait':
+        macroCode += `                        if (!macroStepStarted) {
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (macroTimer.seconds() >= ${step.duration}) {
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'servo_position':
+        macroCode += `                        ${step.servoName}.setPosition(${step.servoPosition});
+                        macroStep++;
+                        break;
+`;
+        break;
+      case 'led_pattern':
+        const patternConst = `BLINKIN_${(step.ledPattern || 'DEFAULT').toUpperCase().replace(/\s+/g, '_')}`;
+        macroCode += `                        blinkin.setPosition(${patternConst});
+                        macroStep++;
+                        break;
+`;
+        break;
+      case 'motor_time':
+        macroCode += `                        if (!macroStepStarted) {
+                            ${step.motorName}.setPower(${step.motorPower});
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (macroTimer.seconds() >= ${step.motorDuration}) {
+                            ${step.motorName}.setPower(0);
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'motor_position':
+        macroCode += `                        if (!macroStepStarted) {
+                            ${step.motorName}.setTargetPosition(${step.motorPosition});
+                            ${step.motorName}.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+                            ${step.motorName}.setPower(${step.motorPower});
+                            macroStepStarted = true;
+                        }
+                        if (!${step.motorName}.isBusy()) {
+                            ${step.motorName}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'motor_until_velocity':
+        macroCode += `                        if (!macroStepStarted) {
+                            ${step.motorName}.setPower(${step.motorPower});
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (Math.abs(${step.motorName}.getVelocity()) >= ${step.targetVelocity} || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                            // Keep motor running, move to next step
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'wait_velocity':
+        macroCode += `                        if (!macroStepStarted) {
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (${step.velocityCondition === 'above' ? 
+                          `Math.abs(${step.motorName}.getVelocity()) >= ${step.targetVelocity}` : 
+                          `Math.abs(${step.motorName}.getVelocity()) <= ${step.targetVelocity}`} || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'drive_distance':
+        macroCode += `                        // Drive ${step.driveDirection} ${step.driveDistance} inches
+                        if (!macroStepStarted) {
+                            // TODO: Implement odometry-based driving
+                            // For now, use time-based approximation
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        {
+                            double driveTime = ${step.driveDistance} / (${step.drivePower} * 24.0); // Approximate: 24 in/sec at full power
+                            double power = ${step.drivePower};
+                            if (macroTimer.seconds() < driveTime) {
+                                ${step.driveDirection === 'forward' ? 
+                                  'frontLeft.setPower(power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(power);' :
+                                  step.driveDirection === 'backward' ?
+                                  'frontLeft.setPower(-power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(-power);' :
+                                  step.driveDirection === 'left' ?
+                                  'frontLeft.setPower(-power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(-power);' :
+                                  'frontLeft.setPower(power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(power);'}
+                            } else {
+                                frontLeft.setPower(0); frontRight.setPower(0); backLeft.setPower(0); backRight.setPower(0);
+                                macroStep++;
+                                macroStepStarted = false;
+                            }
+                        }
+                        break;
+`;
+        break;
+      case 'turn_to_heading':
+        macroCode += `                        // Turn to ${step.targetHeading} degrees
+                        {
+                            double targetRad = Math.toRadians(${step.targetHeading});
+                            double currentRad = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
+                            double error = targetRad - currentRad;
+                            // Normalize error to -PI to PI
+                            while (error > Math.PI) error -= 2 * Math.PI;
+                            while (error < -Math.PI) error += 2 * Math.PI;
+                            if (Math.abs(error) > Math.toRadians(2)) {
+                                double turnPower = Math.max(-${step.drivePower}, Math.min(${step.drivePower}, error * 0.5));
+                                frontLeft.setPower(turnPower); frontRight.setPower(-turnPower);
+                                backLeft.setPower(turnPower); backRight.setPower(-turnPower);
+                            } else {
+                                frontLeft.setPower(0); frontRight.setPower(0); backLeft.setPower(0); backRight.setPower(0);
+                                macroStep++;
+                            }
+                        }
+                        break;
+`;
+        break;
+      case 'drive_time':
+        macroCode += `                        // Drive ${step.driveDirection} for ${step.duration} seconds
+                        if (!macroStepStarted) {
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (macroTimer.seconds() < ${step.duration}) {
+                            double power = ${step.drivePower};
+                            ${step.driveDirection === 'forward' ? 
+                              'frontLeft.setPower(power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(power);' :
+                              step.driveDirection === 'backward' ?
+                              'frontLeft.setPower(-power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(-power);' :
+                              step.driveDirection === 'left' ?
+                              'frontLeft.setPower(-power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(-power);' :
+                              'frontLeft.setPower(power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(power);'}
+                        } else {
+                            frontLeft.setPower(0); frontRight.setPower(0); backLeft.setPower(0); backRight.setPower(0);
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
+                        break;
+`;
+        break;
+      case 'drive_to_tag':
+        macroCode += `                        // Drive to AprilTag ${step.tagId} at ${step.distance}" with offset ${step.offset}
+                        // TODO: Implement Limelight-based navigation
+                        // For now, skip this step
+                        macroStep++;
+                        break;
+`;
+        break;
+      default:
+        macroCode += `                        // Unknown action type: ${step.type}
+                        macroStep++;
+                        break;
+`;
+    }
+  });
+  
+  macroCode += `                    default:
+                        // Macro complete
+                        activeMacro = -1;
+                        macroStep = 0;
+                        macroStepStarted = false;
+                        break;
+                }
+            }
+`;
+  return macroCode;
+}).join('\n')}
+` : ''}
+            // === DRIVE CONTROLS (disabled during macro) ===
+${macros.length > 0 ? `            if (activeMacro == -1) {` : ''}
             double forward = -${getAxisCode(driveForwardBack, driverGamepad)};
             double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
             double rotate = ${getAxisCode(driveRotate, driverGamepad)};
@@ -965,8 +1244,12 @@ ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
+${macros.length > 0 ? `            } // End of activeMacro == -1 block` : ''}
 
             // === TELEMETRY ===
+${macros.length > 0 ? `            if (activeMacro != -1) {
+                telemetry.addData("MACRO", "${macros.map((m, i) => `" + (activeMacro == ${i} ? "${m.name} Step " + macroStep : "") + "`).join('')}");
+            }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
 ${telemetryAprilTag ? `            // AprilTag telemetry would go here (requires Limelight integration)
             telemetry.addData("Tag", "N/A");` : ''}
