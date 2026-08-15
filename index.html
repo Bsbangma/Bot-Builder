@@ -56,6 +56,9 @@ const FTCRobotConfigurator = () => {
   // Active Tab
   const [activeTab, setActiveTab] = React.useState('dimensions');
 
+  // Code Output Mode
+  const [codeOutputMode, setCodeOutputMode] = React.useState('teleop'); // 'snippet' or 'teleop'
+
   // Drive Motors Configuration
   const [motors, setMotors] = React.useState([
     { id: 1, name: 'frontLeft', type: 'gobilda_5203_26_9', hub: 'control', port: 1, reversed: true },
@@ -96,6 +99,25 @@ const FTCRobotConfigurator = () => {
   // AprilTag Configuration
   const [aprilTagSize, setAprilTagSize] = React.useState(165); // mm
   const [targetTags, setTargetTags] = React.useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
+
+  // Controller Configuration
+  const [numControllers, setNumControllers] = React.useState(2);
+  const [gamepad1Role, setGamepad1Role] = React.useState('driver');
+  const [gamepad2Role, setGamepad2Role] = React.useState('operator');
+
+  // Drive Controls
+  const [driveForwardBack, setDriveForwardBack] = React.useState('left_stick_y');
+  const [driveStrafe, setDriveStrafe] = React.useState('left_stick_x');
+  const [driveRotate, setDriveRotate] = React.useState('right_stick_x');
+  const [resetHeadingButton, setResetHeadingButton] = React.useState('options');
+  const [slowModeButton, setSlowModeButton] = React.useState('none');
+  const [slowModeSpeed, setSlowModeSpeed] = React.useState(0.4);
+
+  // Motor Controls (map motor name to control config)
+  const [motorControls, setMotorControls] = React.useState({});
+
+  // Servo Controls (map servo name to control config)
+  const [servoControls, setServoControls] = React.useState({});
 
   // Load saved configs on mount
   React.useEffect(() => {
@@ -378,7 +400,10 @@ const FTCRobotConfigurator = () => {
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub,
       hasBlinkin, blinkinPort, blinkinPatterns,
-      sensors, aprilTagSize, targetTags
+      sensors, aprilTagSize, targetTags,
+      numControllers, gamepad1Role, gamepad2Role,
+      driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
+      slowModeButton, slowModeSpeed, motorControls, servoControls
     };
     
     const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
@@ -433,6 +458,17 @@ const FTCRobotConfigurator = () => {
     setSensors(config.sensors || []);
     setAprilTagSize(config.aprilTagSize || 165);
     setTargetTags(config.targetTags || []);
+    setNumControllers(config.numControllers || 2);
+    setGamepad1Role(config.gamepad1Role || 'driver');
+    setGamepad2Role(config.gamepad2Role || 'operator');
+    setDriveForwardBack(config.driveForwardBack || 'left_stick_y');
+    setDriveStrafe(config.driveStrafe || 'left_stick_x');
+    setDriveRotate(config.driveRotate || 'right_stick_x');
+    setResetHeadingButton(config.resetHeadingButton || 'options');
+    setSlowModeButton(config.slowModeButton || 'none');
+    setSlowModeSpeed(config.slowModeSpeed || 0.4);
+    setMotorControls(config.motorControls || {});
+    setServoControls(config.servoControls || {});
     setShowLoadModal(false);
   };
 
@@ -448,7 +484,7 @@ const FTCRobotConfigurator = () => {
     const config = {
       name: robotName,
       exportedAt: new Date().toISOString(),
-      version: '2.0',
+      version: '3.0',
       robotLength, robotWidth,
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
@@ -457,7 +493,10 @@ const FTCRobotConfigurator = () => {
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub,
       hasBlinkin, blinkinPort, blinkinPatterns,
-      sensors, aprilTagSize, targetTags
+      sensors, aprilTagSize, targetTags,
+      numControllers, gamepad1Role, gamepad2Role,
+      driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
+      slowModeButton, slowModeSpeed, motorControls, servoControls
     };
     
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
@@ -627,6 +666,273 @@ ${sensors.map(s => {
   return `// ${s.name} - ${sensorInfo?.name || 'Unknown'}`;
 }).join('\n\n')}
 ` : '// No sensors configured'}
+`;
+  };
+
+  // Generate Complete TeleOp Code
+  const generateCompleteTeleOp = () => {
+    const driverGamepad = gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2';
+    const operatorGamepad = gamepad1Role === 'operator' ? 'gamepad1' : 'gamepad2';
+
+    // Helper to convert control name to Java code
+    const getAxisCode = (axis, gamepad) => {
+      const map = {
+        'left_stick_y': `${gamepad}.left_stick_y`,
+        'left_stick_x': `${gamepad}.left_stick_x`,
+        'right_stick_y': `${gamepad}.right_stick_y`,
+        'right_stick_x': `${gamepad}.right_stick_x`
+      };
+      return map[axis] || `${gamepad}.left_stick_y`;
+    };
+
+    const getButtonCode = (button, gamepad) => {
+      const map = {
+        'a': `${gamepad}.a`,
+        'b': `${gamepad}.b`,
+        'x': `${gamepad}.x`,
+        'y': `${gamepad}.y`,
+        'left_bumper': `${gamepad}.left_bumper`,
+        'right_bumper': `${gamepad}.right_bumper`,
+        'dpad_up': `${gamepad}.dpad_up`,
+        'dpad_down': `${gamepad}.dpad_down`,
+        'dpad_left': `${gamepad}.dpad_left`,
+        'dpad_right': `${gamepad}.dpad_right`,
+        'options': `${gamepad}.options`,
+        'start': `${gamepad}.start`,
+        'left_stick_button': `${gamepad}.left_stick_button`,
+        'right_stick_button': `${gamepad}.right_stick_button`
+      };
+      return map[button] || `${gamepad}.a`;
+    };
+
+    // Generate motor control code
+    const generateMotorControlCode = (motor) => {
+      const ctrl = motorControls[motor.name] || {
+        controller: operatorGamepad,
+        control: 'trigger_pair',
+        behavior: 'hold',
+        power: 1.0
+      };
+      const gp = ctrl.controller;
+      const power = ctrl.power;
+
+      let code = '';
+      if (ctrl.behavior === 'toggle') {
+        code = `        // ${motor.name} - Toggle control
+        if (${getButtonCode(ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a', gp)} && !${motor.name}ButtonPrev) {
+            ${motor.name}Running = !${motor.name}Running;
+        }
+        ${motor.name}ButtonPrev = ${getButtonCode(ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a', gp)};
+        ${motor.name}.setPower(${motor.name}Running ? ${power} : 0);`;
+      } else {
+        // Hold behavior
+        switch (ctrl.control) {
+          case 'trigger_pair':
+            code = `        // ${motor.name} - Trigger control
+        ${motor.name}.setPower((${gp}.right_trigger - ${gp}.left_trigger) * ${power});`;
+            break;
+          case 'bumper_pair':
+            code = `        // ${motor.name} - Bumper control
+        if (${gp}.right_bumper) ${motor.name}.setPower(${power});
+        else if (${gp}.left_bumper) ${motor.name}.setPower(-${power});
+        else ${motor.name}.setPower(0);`;
+            break;
+          case 'dpad_updown':
+            code = `        // ${motor.name} - D-Pad Up/Down control
+        if (${gp}.dpad_up) ${motor.name}.setPower(${power});
+        else if (${gp}.dpad_down) ${motor.name}.setPower(-${power});
+        else ${motor.name}.setPower(0);`;
+            break;
+          case 'dpad_leftright':
+            code = `        // ${motor.name} - D-Pad Left/Right control
+        if (${gp}.dpad_right) ${motor.name}.setPower(${power});
+        else if (${gp}.dpad_left) ${motor.name}.setPower(-${power});
+        else ${motor.name}.setPower(0);`;
+            break;
+          case 'left_stick_y':
+            code = `        // ${motor.name} - Left Stick Y control
+        ${motor.name}.setPower(-${gp}.left_stick_y * ${power});`;
+            break;
+          case 'right_stick_y':
+            code = `        // ${motor.name} - Right Stick Y control
+        ${motor.name}.setPower(-${gp}.right_stick_y * ${power});`;
+            break;
+          case 'ab_buttons':
+            code = `        // ${motor.name} - A/B button control
+        if (${gp}.a) ${motor.name}.setPower(${power});
+        else if (${gp}.b) ${motor.name}.setPower(-${power});
+        else ${motor.name}.setPower(0);`;
+            break;
+          case 'xy_buttons':
+            code = `        // ${motor.name} - X/Y button control
+        if (${gp}.y) ${motor.name}.setPower(${power});
+        else if (${gp}.x) ${motor.name}.setPower(-${power});
+        else ${motor.name}.setPower(0);`;
+            break;
+          default:
+            code = `        // ${motor.name} - Default trigger control
+        ${motor.name}.setPower((${gp}.right_trigger - ${gp}.left_trigger) * ${power});`;
+        }
+      }
+      return code;
+    };
+
+    // Generate servo control code
+    const generateServoControlCode = (servo) => {
+      const ctrl = servoControls[servo.name] || {
+        controller: operatorGamepad,
+        button: 'a',
+        behavior: 'toggle',
+        position1: 0.0,
+        position2: 1.0
+      };
+      const gp = ctrl.controller;
+      const btn = getButtonCode(ctrl.button, gp);
+
+      if (ctrl.behavior === 'toggle') {
+        return `        // ${servo.name} - Toggle control
+        if (${btn} && !${servo.name}ButtonPrev) {
+            ${servo.name}Open = !${servo.name}Open;
+            ${servo.name}.setPosition(${servo.name}Open ? ${ctrl.position2} : ${ctrl.position1});
+        }
+        ${servo.name}ButtonPrev = ${btn};`;
+      } else {
+        return `        // ${servo.name} - Hold control
+        ${servo.name}.setPosition(${btn} ? ${ctrl.position2} : ${ctrl.position1});`;
+      }
+    };
+
+    // Build toggle state variables
+    const toggleMotors = auxMotors.filter(m => (motorControls[m.name]?.behavior || 'hold') === 'toggle');
+    const toggleServos = servos.filter(s => (servoControls[s.name]?.behavior || 'toggle') === 'toggle');
+
+    return `package org.firstinspires.ftc.teamcode;
+
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.IMU;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+
+@TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
+public class ${robotName.replace(/\s+/g, '')}TeleOp extends LinearOpMode {
+
+    // Drive Motors
+${motors.map(m => `    private DcMotor ${m.name};`).join('\n')}
+
+${auxMotors.length > 0 ? `    // Auxiliary Motors
+${auxMotors.map(m => `    private DcMotor ${m.name};`).join('\n')}` : ''}
+
+${servos.length > 0 ? `    // Servos
+${servos.map(s => `    private Servo ${s.name};`).join('\n')}` : ''}
+
+    // IMU
+    private IMU imu;
+
+${hasBlinkin ? `    // Blinkin LED
+    private Servo blinkin;
+${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toUpperCase().replace(/\s+/g, '_')} = ${blinkinDatabase[p.pattern]?.ftcValue.toFixed(3)};`).join('\n')}` : ''}
+
+    // Field-oriented driving
+    private double headingOffset = 0;
+
+${toggleMotors.length > 0 ? `    // Motor toggle states
+${toggleMotors.map(m => `    private boolean ${m.name}Running = false;
+    private boolean ${m.name}ButtonPrev = false;`).join('\n')}` : ''}
+
+${toggleServos.length > 0 ? `    // Servo toggle states
+${toggleServos.map(s => `    private boolean ${s.name}Open = false;
+    private boolean ${s.name}ButtonPrev = false;`).join('\n')}` : ''}
+
+    @Override
+    public void runOpMode() {
+        // Initialize drive motors
+${motors.map(m => `        ${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
+        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}
+
+${auxMotors.length > 0 ? `        // Initialize auxiliary motors
+${auxMotors.map(m => `        ${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
+        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}` : ''}
+
+${servos.length > 0 ? `        // Initialize servos
+${servos.map(s => `        ${s.name} = hardwareMap.get(Servo.class, "${s.name}");`).join('\n')}` : ''}
+
+        // Initialize IMU
+        imu = hardwareMap.get(IMU.class, "imu");
+        RevHubOrientationOnRobot.LogoFacingDirection logoDirection = RevHubOrientationOnRobot.LogoFacingDirection.${imuLogoDirection};
+        RevHubOrientationOnRobot.UsbFacingDirection usbDirection = RevHubOrientationOnRobot.UsbFacingDirection.${imuUsbDirection};
+        imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(logoDirection, usbDirection)));
+
+${hasBlinkin ? `        // Initialize Blinkin
+        blinkin = hardwareMap.get(Servo.class, "blinkin");
+        blinkin.setPosition(BLINKIN_${(blinkinPatterns[0]?.name || 'DEFAULT').toUpperCase().replace(/\s+/g, '_')});` : ''}
+
+        telemetry.addLine("${robotName} Ready!");
+        telemetry.update();
+
+        waitForStart();
+
+        while (opModeIsActive()) {
+            // === DRIVE CONTROLS ===
+            double forward = -${getAxisCode(driveForwardBack, driverGamepad)};
+            double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
+            double rotate = ${getAxisCode(driveRotate, driverGamepad)};
+
+            // Reset heading
+            if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
+                headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+            }
+
+${slowModeButton !== 'none' ? `            // Slow mode
+            double speedMultiplier = ${getButtonCode(slowModeButton, driverGamepad)} ? ${slowModeSpeed} : 1.0;
+            forward *= speedMultiplier;
+            strafe *= speedMultiplier;
+            rotate *= speedMultiplier;` : ''}
+
+            // Field-oriented transform
+            double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
+            double rotatedForward = forward * Math.cos(heading) + strafe * Math.sin(heading);
+            double rotatedStrafe = -forward * Math.sin(heading) + strafe * Math.cos(heading);
+
+            // Mecanum drive math
+            double frontLeftPower = rotatedForward + rotatedStrafe + rotate;
+            double frontRightPower = rotatedForward - rotatedStrafe - rotate;
+            double backLeftPower = rotatedForward - rotatedStrafe + rotate;
+            double backRightPower = rotatedForward + rotatedStrafe - rotate;
+
+            // Normalize powers
+            double maxPower = Math.max(Math.max(Math.abs(frontLeftPower), Math.abs(frontRightPower)),
+                                       Math.max(Math.abs(backLeftPower), Math.abs(backRightPower)));
+            if (maxPower > 1.0) {
+                frontLeftPower /= maxPower;
+                frontRightPower /= maxPower;
+                backLeftPower /= maxPower;
+                backRightPower /= maxPower;
+            }
+
+            // Set drive motor powers
+            frontLeft.setPower(frontLeftPower);
+            frontRight.setPower(frontRightPower);
+            backLeft.setPower(backLeftPower);
+            backRight.setPower(backRightPower);
+
+${auxMotors.length > 0 ? `            // === AUXILIARY MOTOR CONTROLS ===
+${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
+
+${servos.length > 0 ? `            // === SERVO CONTROLS ===
+${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
+
+            // Telemetry
+            telemetry.addData("Heading", "%.1f°", Math.toDegrees(heading));
+${auxMotors.length > 0 ? auxMotors.map(m => `            telemetry.addData("${m.name}", "%.2f", ${m.name}.getPower());`).join('\n') : ''}
+${servos.length > 0 ? servos.map(s => `            telemetry.addData("${s.name}", "%.2f", ${s.name}.getPosition());`).join('\n') : ''}
+            telemetry.update();
+        }
+    }
+}
 `;
   };
 
@@ -1772,21 +2078,472 @@ Make sure your code initializes the IMU with these orientations!
           </div>
         );
 
-      case 'output':
+      case 'controls':
+        const buttonOptions = [
+          { value: 'none', label: 'None' },
+          { value: 'a', label: 'A Button' },
+          { value: 'b', label: 'B Button' },
+          { value: 'x', label: 'X Button' },
+          { value: 'y', label: 'Y Button' },
+          { value: 'left_bumper', label: 'Left Bumper' },
+          { value: 'right_bumper', label: 'Right Bumper' },
+          { value: 'dpad_up', label: 'D-Pad Up' },
+          { value: 'dpad_down', label: 'D-Pad Down' },
+          { value: 'dpad_left', label: 'D-Pad Left' },
+          { value: 'dpad_right', label: 'D-Pad Right' },
+          { value: 'options', label: 'Options' },
+          { value: 'start', label: 'Start' },
+          { value: 'left_stick_button', label: 'Left Stick Click' },
+          { value: 'right_stick_button', label: 'Right Stick Click' }
+        ];
+        
+        const axisOptions = [
+          { value: 'left_stick_y', label: 'Left Stick Y' },
+          { value: 'left_stick_x', label: 'Left Stick X' },
+          { value: 'right_stick_y', label: 'Right Stick Y' },
+          { value: 'right_stick_x', label: 'Right Stick X' }
+        ];
+
+        const motorControlOptions = [
+          { value: 'trigger_pair', label: 'RT Forward / LT Reverse' },
+          { value: 'bumper_pair', label: 'RB Forward / LB Reverse' },
+          { value: 'dpad_updown', label: 'D-Pad Up / Down' },
+          { value: 'dpad_leftright', label: 'D-Pad Left / Right' },
+          { value: 'left_stick_y', label: 'Left Stick Y Axis' },
+          { value: 'right_stick_y', label: 'Right Stick Y Axis' },
+          { value: 'ab_buttons', label: 'A Forward / B Reverse' },
+          { value: 'xy_buttons', label: 'Y Forward / X Reverse' }
+        ];
+
+        const getDefaultMotorControl = (motorName) => {
+          return motorControls[motorName] || { 
+            controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
+            control: 'trigger_pair',
+            behavior: 'hold',
+            power: 1.0
+          };
+        };
+
+        const updateMotorControl = (motorName, field, value) => {
+          const current = getDefaultMotorControl(motorName);
+          setMotorControls({
+            ...motorControls,
+            [motorName]: { ...current, [field]: value }
+          });
+        };
+
+        const getDefaultServoControl = (servoName) => {
+          return servoControls[servoName] || {
+            controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
+            button: 'a',
+            behavior: 'toggle',
+            position1: 0.0,
+            position2: 1.0
+          };
+        };
+
+        const updateServoControl = (servoName, field, value) => {
+          const current = getDefaultServoControl(servoName);
+          setServoControls({
+            ...servoControls,
+            [servoName]: { ...current, [field]: value }
+          });
+        };
+
         return (
           <div className="space-y-6">
-            <h3 className="text-xl font-bold text-green-400">Generated Code</h3>
+            <h3 className="text-xl font-bold text-green-400">Controller & Controls</h3>
+            
+            {/* Controller Setup */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Controller Setup</h4>
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Number of Controllers</label>
+                  <select
+                    value={numControllers}
+                    onChange={(e) => setNumControllers(parseInt(e.target.value))}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value={1}>1 Controller</option>
+                    <option value={2}>2 Controllers</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Gamepad 1 Role</label>
+                  <select
+                    value={gamepad1Role}
+                    onChange={(e) => {
+                      setGamepad1Role(e.target.value);
+                      if (numControllers === 2) setGamepad2Role(e.target.value === 'driver' ? 'operator' : 'driver');
+                    }}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value="driver">Driver</option>
+                    <option value="operator">Operator</option>
+                    {numControllers === 1 && <option value="both">Both</option>}
+                  </select>
+                </div>
+                {numControllers === 2 && (
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Gamepad 2 Role</label>
+                    <select
+                      value={gamepad2Role}
+                      onChange={(e) => {
+                        setGamepad2Role(e.target.value);
+                        setGamepad1Role(e.target.value === 'driver' ? 'operator' : 'driver');
+                      }}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      <option value="driver">Driver</option>
+                      <option value="operator">Operator</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Drive Controls */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Drive Controls</h4>
+              <p className="text-gray-400 text-sm mb-3">Assigned to: {gamepad1Role === 'driver' ? 'Gamepad 1' : 'Gamepad 2'}</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Forward / Back</label>
+                  <select
+                    value={driveForwardBack}
+                    onChange={(e) => setDriveForwardBack(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    {axisOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Strafe</label>
+                  <select
+                    value={driveStrafe}
+                    onChange={(e) => setDriveStrafe(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    {axisOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Rotate</label>
+                  <select
+                    value={driveRotate}
+                    onChange={(e) => setDriveRotate(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    {axisOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Reset Field Orientation</label>
+                  <select
+                    value={resetHeadingButton}
+                    onChange={(e) => setResetHeadingButton(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    {buttonOptions.filter(b => b.value !== 'none').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Slow Mode Button</label>
+                  <select
+                    value={slowModeButton}
+                    onChange={(e) => setSlowModeButton(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    {buttonOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                  </select>
+                </div>
+                {slowModeButton !== 'none' && (
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Slow Mode Speed</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="0.9"
+                      step="0.1"
+                      value={slowModeSpeed}
+                      onChange={(e) => setSlowModeSpeed(parseFloat(e.target.value))}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Auxiliary Motor Controls */}
+            {auxMotors.length > 0 && (
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <h4 className="text-lg font-semibold text-orange-400 mb-3">Motor Controls</h4>
+                <div className="space-y-3">
+                  {auxMotors.map(motor => {
+                    const ctrl = getDefaultMotorControl(motor.name);
+                    return (
+                      <div key={motor.id} className="bg-gray-800 p-3 rounded-lg">
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-white font-semibold">{motor.name}</span>
+                          <span className="text-gray-400 text-sm">{motorDatabase[motor.type]?.name}</span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-2">
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Controller</label>
+                            <select
+                              value={ctrl.controller}
+                              onChange={(e) => updateMotorControl(motor.name, 'controller', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              <option value="gamepad1">Gamepad 1</option>
+                              {numControllers === 2 && <option value="gamepad2">Gamepad 2</option>}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Control</label>
+                            <select
+                              value={ctrl.control}
+                              onChange={(e) => updateMotorControl(motor.name, 'control', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              {motorControlOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Behavior</label>
+                            <select
+                              value={ctrl.behavior}
+                              onChange={(e) => updateMotorControl(motor.name, 'behavior', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              <option value="hold">Hold (runs while pressed)</option>
+                              <option value="toggle">Toggle (press to start/stop)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Power</label>
+                            <input
+                              type="number"
+                              min="0.1"
+                              max="1.0"
+                              step="0.1"
+                              value={ctrl.power}
+                              onChange={(e) => updateMotorControl(motor.name, 'power', parseFloat(e.target.value))}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Servo Controls */}
+            {servos.length > 0 && (
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <h4 className="text-lg font-semibold text-purple-400 mb-3">Servo Controls</h4>
+                <div className="space-y-3">
+                  {servos.map(servo => {
+                    const ctrl = getDefaultServoControl(servo.name);
+                    return (
+                      <div key={servo.id} className="bg-gray-800 p-3 rounded-lg">
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-white font-semibold">{servo.name}</span>
+                          <span className="text-gray-400 text-sm">{servoDatabase[servo.type]?.name}</span>
+                        </div>
+                        <div className="grid grid-cols-5 gap-2">
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Controller</label>
+                            <select
+                              value={ctrl.controller}
+                              onChange={(e) => updateServoControl(servo.name, 'controller', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              <option value="gamepad1">Gamepad 1</option>
+                              {numControllers === 2 && <option value="gamepad2">Gamepad 2</option>}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Button</label>
+                            <select
+                              value={ctrl.button}
+                              onChange={(e) => updateServoControl(servo.name, 'button', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              {buttonOptions.filter(b => b.value !== 'none').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Behavior</label>
+                            <select
+                              value={ctrl.behavior}
+                              onChange={(e) => updateServoControl(servo.name, 'behavior', e.target.value)}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            >
+                              <option value="toggle">Toggle (press to swap)</option>
+                              <option value="hold">Hold (press = Pos 2)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Position 1</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={ctrl.position1}
+                              onChange={(e) => updateServoControl(servo.name, 'position1', parseFloat(e.target.value))}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-400 mb-1">Position 2</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={ctrl.position2}
+                              onChange={(e) => updateServoControl(servo.name, 'position2', parseFloat(e.target.value))}
+                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Empty state */}
+            {auxMotors.length === 0 && servos.length === 0 && (
+              <div className="bg-gray-700 p-6 rounded-lg text-center">
+                <p className="text-gray-400">No auxiliary motors or servos configured.</p>
+                <p className="text-gray-500 text-sm mt-2">Add motors in the "Motors" tab and servos in the "Servos" tab to configure their controls here.</p>
+              </div>
+            )}
+
+            {/* Control Summary */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-green-400 mb-3">Control Summary</h4>
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <h5 className="text-blue-400 font-semibold mb-2">
+                    {gamepad1Role === 'driver' ? '🎮 Gamepad 1 (Driver)' : '🎮 Gamepad 1 (Operator)'}
+                  </h5>
+                  <ul className="text-gray-300 space-y-1">
+                    {gamepad1Role === 'driver' && (
+                      <>
+                        <li>• {axisOptions.find(a => a.value === driveForwardBack)?.label}: Forward/Back</li>
+                        <li>• {axisOptions.find(a => a.value === driveStrafe)?.label}: Strafe</li>
+                        <li>• {axisOptions.find(a => a.value === driveRotate)?.label}: Rotate</li>
+                        <li>• {buttonOptions.find(b => b.value === resetHeadingButton)?.label}: Reset Heading</li>
+                        {slowModeButton !== 'none' && <li>• {buttonOptions.find(b => b.value === slowModeButton)?.label}: Slow Mode</li>}
+                      </>
+                    )}
+                    {auxMotors.filter(m => getDefaultMotorControl(m.name).controller === 'gamepad1').map(m => (
+                      <li key={m.id}>• {motorControlOptions.find(o => o.value === getDefaultMotorControl(m.name).control)?.label}: {m.name}</li>
+                    ))}
+                    {servos.filter(s => getDefaultServoControl(s.name).controller === 'gamepad1').map(s => (
+                      <li key={s.id}>• {buttonOptions.find(b => b.value === getDefaultServoControl(s.name).button)?.label}: {s.name}</li>
+                    ))}
+                  </ul>
+                </div>
+                {numControllers === 2 && (
+                  <div>
+                    <h5 className="text-purple-400 font-semibold mb-2">
+                      {gamepad2Role === 'driver' ? '🎮 Gamepad 2 (Driver)' : '🎮 Gamepad 2 (Operator)'}
+                    </h5>
+                    <ul className="text-gray-300 space-y-1">
+                      {gamepad2Role === 'driver' && (
+                        <>
+                          <li>• {axisOptions.find(a => a.value === driveForwardBack)?.label}: Forward/Back</li>
+                          <li>• {axisOptions.find(a => a.value === driveStrafe)?.label}: Strafe</li>
+                          <li>• {axisOptions.find(a => a.value === driveRotate)?.label}: Rotate</li>
+                          <li>• {buttonOptions.find(b => b.value === resetHeadingButton)?.label}: Reset Heading</li>
+                          {slowModeButton !== 'none' && <li>• {buttonOptions.find(b => b.value === slowModeButton)?.label}: Slow Mode</li>}
+                        </>
+                      )}
+                      {auxMotors.filter(m => getDefaultMotorControl(m.name).controller === 'gamepad2').map(m => (
+                        <li key={m.id}>• {motorControlOptions.find(o => o.value === getDefaultMotorControl(m.name).control)?.label}: {m.name}</li>
+                      ))}
+                      {servos.filter(s => getDefaultServoControl(s.name).controller === 'gamepad2').map(s => (
+                        <li key={s.id}>• {buttonOptions.find(b => b.value === getDefaultServoControl(s.name).button)?.label}: {s.name}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'output':
+        const currentCode = codeOutputMode === 'teleop' ? generateCompleteTeleOp() : generateCodeSnippet();
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Generated Code</h3>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCodeOutputMode('teleop')}
+                  className={`px-3 py-1 rounded text-sm font-medium ${
+                    codeOutputMode === 'teleop' 
+                      ? 'bg-green-600 text-white' 
+                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                  }`}
+                >
+                  Complete TeleOp
+                </button>
+                <button
+                  onClick={() => setCodeOutputMode('snippet')}
+                  className={`px-3 py-1 rounded text-sm font-medium ${
+                    codeOutputMode === 'snippet' 
+                      ? 'bg-green-600 text-white' 
+                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                  }`}
+                >
+                  Config Snippet
+                </button>
+              </div>
+            </div>
+            
+            <div className="bg-gray-700 p-3 rounded-lg text-sm text-gray-300">
+              {codeOutputMode === 'teleop' ? (
+                <p>📋 <strong>Complete TeleOp:</strong> Ready-to-paste OpMode with field-oriented mecanum drive and all your controls configured. Copy this into OnBot Java or Android Studio.</p>
+              ) : (
+                <p>📋 <strong>Config Snippet:</strong> Just the constants and initialization code. Paste into your own OpMode.</p>
+              )}
+            </div>
+
             <div className="relative">
-              <pre className="bg-gray-900 p-4 rounded-lg text-sm text-gray-300 overflow-x-auto max-h-96 overflow-y-auto font-mono">
-                {generateCodeSnippet()}
+              <pre className="bg-gray-900 p-4 rounded-lg text-sm text-gray-300 overflow-x-auto max-h-96 overflow-y-auto font-mono whitespace-pre">
+                {currentCode}
               </pre>
               <button
-                onClick={() => navigator.clipboard.writeText(generateCodeSnippet())}
+                onClick={() => navigator.clipboard.writeText(currentCode)}
                 className="absolute top-2 right-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
               >
                 Copy
               </button>
             </div>
+
+            {codeOutputMode === 'teleop' && (
+              <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
+                <h4 className="text-blue-400 font-semibold mb-2">📝 Next Steps:</h4>
+                <ol className="text-blue-200 space-y-1 list-decimal list-inside">
+                  <li>Copy the code above</li>
+                  <li>In OnBot Java, create a new file: <code className="bg-blue-800 px-1 rounded">{robotName.replace(/\s+/g, '')}TeleOp.java</code></li>
+                  <li>Paste and save</li>
+                  <li>Configure your Driver Station (see DS tab)</li>
+                  <li>Test and drive!</li>
+                </ol>
+              </div>
+            )}
           </div>
         );
 
@@ -2492,6 +3249,7 @@ Make sure your code initializes the IMU with these orientations!
               { id: 'apriltags', label: 'Tags' },
               { id: 'blinkin', label: 'LEDs' },
               { id: 'ports', label: 'Ports' },
+              { id: 'controls', label: 'Controls' },
               { id: 'output', label: 'Code' },
               { id: 'driverstation', label: 'DS' }
             ].map((tab) => (
