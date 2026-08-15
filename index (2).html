@@ -1,0 +1,2537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FTC Robot Configurator</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #111827; }
+    .form-checkbox:checked { background-color: #10B981; border-color: #10B981; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+
+const FTCRobotConfigurator = () => {
+  // Robot Dimensions
+  const [robotLength, setRobotLength] = useState(18);
+  const [robotWidth, setRobotWidth] = useState(18);
+
+  // Drive Wheels
+  const [wheelBrand, setWheelBrand] = useState('gobilda');
+  const [wheelType, setWheelType] = useState('mecanum');
+  const [wheelSize, setWheelSize] = useState(104);
+
+  // Odometry Pod 1
+  const [odo1Type, setOdo1Type] = useState('gobilda_4bar');
+  const [odo1FromBack, setOdo1FromBack] = useState(9);
+  const [odo1FromRight, setOdo1FromRight] = useState(9);
+  const [odo1Reversed, setOdo1Reversed] = useState(false);
+  const [odo1Measures, setOdo1Measures] = useState('forward_back');
+
+  // Odometry Pod 2
+  const [odo2Type, setOdo2Type] = useState('gobilda_4bar');
+  const [odo2FromBack, setOdo2FromBack] = useState(9);
+  const [odo2FromRight, setOdo2FromRight] = useState(9);
+  const [odo2Reversed, setOdo2Reversed] = useState(false);
+  const [odo2Measures, setOdo2Measures] = useState('left_right');
+
+  // IMU Configuration
+  const [imuLocation, setImuLocation] = useState('control_hub');
+  const [imuLogoDirection, setImuLogoDirection] = useState('UP');
+  const [imuUsbDirection, setImuUsbDirection] = useState('FORWARD');
+
+  // Limelight Configuration
+  const [limelightVersion, setLimelightVersion] = useState('3a');
+  const [limelightFromBack, setLimelightFromBack] = useState(9);
+  const [limelightFromRight, setLimelightFromRight] = useState(9);
+  const [limelightHeight, setLimelightHeight] = useState(8);
+  const [limelightFacing, setLimelightFacing] = useState('FORWARD');
+
+  // Active Tab
+  const [activeTab, setActiveTab] = useState('dimensions');
+
+  // Drive Motors Configuration
+  const [motors, setMotors] = useState([
+    { id: 1, name: 'frontLeft', type: 'gobilda_5203_26_9', hub: 'control', port: 1, reversed: true },
+    { id: 2, name: 'frontRight', type: 'gobilda_5203_26_9', hub: 'control', port: 0, reversed: false },
+    { id: 3, name: 'backLeft', type: 'gobilda_5203_26_9', hub: 'control', port: 3, reversed: true },
+    { id: 4, name: 'backRight', type: 'gobilda_5203_26_9', hub: 'control', port: 2, reversed: false }
+  ]);
+
+  // Auxiliary Motors Configuration (arm, intake, etc.)
+  const [auxMotors, setAuxMotors] = useState([]);
+
+  // Servos Configuration
+  const [servos, setServos] = useState([]);
+
+  // Expansion Hub
+  const [hasExpansionHub, setHasExpansionHub] = useState(false);
+
+  // Odometry Encoder Ports
+  const [odo1Port, setOdo1Port] = useState({ hub: 'control', port: 0 });
+  const [odo2Port, setOdo2Port] = useState({ hub: 'control', port: 1 });
+
+  // Robot Name (for save/load)
+  const [robotName, setRobotName] = useState('My Robot');
+  const [savedConfigs, setSavedConfigs] = useState([]);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showLoadModal, setShowLoadModal] = useState(false);
+
+  // Blinkin LED Configuration
+  const [hasBlinkin, setHasBlinkin] = useState(false);
+  const [blinkinPort, setBlinkinPort] = useState({ hub: 'control', port: 0 });
+  const [blinkinPatterns, setBlinkinPatterns] = useState([
+    { id: 1, name: 'default', pattern: 'solid_green', description: 'Default state' }
+  ]);
+
+  // Sensors Configuration
+  const [sensors, setSensors] = useState([]);
+
+  // AprilTag Configuration
+  const [aprilTagSize, setAprilTagSize] = useState(165); // mm
+  const [targetTags, setTargetTags] = useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
+
+  // Load saved configs on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('ftc_robot_configs');
+    if (saved) {
+      setSavedConfigs(JSON.parse(saved));
+    }
+  }, []);
+
+  // Wheel Database
+  const wheelDatabase = {
+    gobilda: {
+      name: 'GoBilda',
+      mecanum: [
+        { size: 96, name: '96mm Mecanum', circumference: 96 * Math.PI },
+        { size: 104, name: '104mm Mecanum', circumference: 104 * Math.PI }
+      ],
+      omni: [
+        { size: 96, name: '96mm Omni', circumference: 96 * Math.PI },
+        { size: 104, name: '104mm Omni', circumference: 104 * Math.PI }
+      ],
+      traction: [
+        { size: 96, name: '96mm Traction', circumference: 96 * Math.PI },
+        { size: 104, name: '104mm Traction', circumference: 104 * Math.PI }
+      ]
+    },
+    rev: {
+      name: 'REV Robotics',
+      mecanum: [
+        { size: 75, name: '75mm Mecanum', circumference: 75 * Math.PI }
+      ],
+      omni: [
+        { size: 75, name: '75mm Omni', circumference: 75 * Math.PI },
+        { size: 90, name: '90mm Omni', circumference: 90 * Math.PI }
+      ],
+      traction: [
+        { size: 90, name: '90mm Traction', circumference: 90 * Math.PI }
+      ]
+    }
+  };
+
+  // Odometry Pod Database
+  const odoDatabase = {
+    gobilda_4bar: {
+      name: 'GoBilda 4-Bar Pod',
+      wheelDiameter: 32,
+      cpr: 2000,
+      ticksPerMm: 2000 / (32 * Math.PI),
+      ticksPerInch: 2000 / (32 * Math.PI) * 25.4
+    },
+    gobilda_swingarm: {
+      name: 'GoBilda Swingarm Pod',
+      wheelDiameter: 48,
+      cpr: 2000,
+      ticksPerMm: 2000 / (48 * Math.PI),
+      ticksPerInch: 2000 / (48 * Math.PI) * 25.4
+    },
+    rev_throughbore: {
+      name: 'REV Through Bore + Dead Wheel',
+      wheelDiameter: 35,
+      cpr: 8192,
+      ticksPerMm: 8192 / (35 * Math.PI),
+      ticksPerInch: 8192 / (35 * Math.PI) * 25.4
+    }
+  };
+
+  // Motor Database
+  const motorDatabase = {
+    // GoBilda Yellow Jacket 5203 Series
+    gobilda_5203_5_2: { name: 'GoBilda 5203 - 5.2:1 (1150 RPM)', brand: 'GoBilda', rpm: 1150, ticksPerRev: 145.1, stallTorque: 0.35 },
+    gobilda_5203_13_7: { name: 'GoBilda 5203 - 13.7:1 (435 RPM)', brand: 'GoBilda', rpm: 435, ticksPerRev: 384.5, stallTorque: 0.93 },
+    gobilda_5203_19_2: { name: 'GoBilda 5203 - 19.2:1 (312 RPM)', brand: 'GoBilda', rpm: 312, ticksPerRev: 537.7, stallTorque: 1.30 },
+    gobilda_5203_26_9: { name: 'GoBilda 5203 - 26.9:1 (223 RPM)', brand: 'GoBilda', rpm: 223, ticksPerRev: 751.8, stallTorque: 1.82 },
+    gobilda_5203_50_9: { name: 'GoBilda 5203 - 50.9:1 (117 RPM)', brand: 'GoBilda', rpm: 117, ticksPerRev: 1425.1, stallTorque: 3.45 },
+    gobilda_5203_71_2: { name: 'GoBilda 5203 - 71.2:1 (84 RPM)', brand: 'GoBilda', rpm: 84, ticksPerRev: 1993.6, stallTorque: 4.83 },
+    gobilda_5203_139: { name: 'GoBilda 5203 - 139:1 (43 RPM)', brand: 'GoBilda', rpm: 43, ticksPerRev: 3895.9, stallTorque: 9.43 },
+    gobilda_5203_188: { name: 'GoBilda 5203 - 188:1 (30 RPM)', brand: 'GoBilda', rpm: 30, ticksPerRev: 5281.1, stallTorque: 12.75 },
+    // REV Motors
+    rev_hd_hex_40: { name: 'REV HD Hex - 40:1 (150 RPM)', brand: 'REV', rpm: 150, ticksPerRev: 1120, stallTorque: 3.2 },
+    rev_hd_hex_20: { name: 'REV HD Hex - 20:1 (300 RPM)', brand: 'REV', rpm: 300, ticksPerRev: 560, stallTorque: 1.6 },
+    rev_core_hex: { name: 'REV Core Hex Motor (125 RPM)', brand: 'REV', rpm: 125, ticksPerRev: 288, stallTorque: 3.2 },
+    rev_ultraplanetary_3: { name: 'REV UltraPlanetary 3:1', brand: 'REV', rpm: 1900, ticksPerRev: 84, stallTorque: 0.25 },
+    rev_ultraplanetary_4: { name: 'REV UltraPlanetary 4:1', brand: 'REV', rpm: 1425, ticksPerRev: 112, stallTorque: 0.33 },
+    rev_ultraplanetary_5: { name: 'REV UltraPlanetary 5:1', brand: 'REV', rpm: 1140, ticksPerRev: 140, stallTorque: 0.42 },
+    rev_ultraplanetary_9: { name: 'REV UltraPlanetary 3:1 + 3:1 (9:1)', brand: 'REV', rpm: 633, ticksPerRev: 252, stallTorque: 0.75 },
+    rev_ultraplanetary_12: { name: 'REV UltraPlanetary 3:1 + 4:1 (12:1)', brand: 'REV', rpm: 475, ticksPerRev: 336, stallTorque: 1.0 },
+    rev_ultraplanetary_15: { name: 'REV UltraPlanetary 3:1 + 5:1 (15:1)', brand: 'REV', rpm: 380, ticksPerRev: 420, stallTorque: 1.25 },
+    rev_ultraplanetary_16: { name: 'REV UltraPlanetary 4:1 + 4:1 (16:1)', brand: 'REV', rpm: 356, ticksPerRev: 448, stallTorque: 1.33 },
+    rev_ultraplanetary_20: { name: 'REV UltraPlanetary 4:1 + 5:1 (20:1)', brand: 'REV', rpm: 285, ticksPerRev: 560, stallTorque: 1.67 },
+    rev_ultraplanetary_25: { name: 'REV UltraPlanetary 5:1 + 5:1 (25:1)', brand: 'REV', rpm: 228, ticksPerRev: 700, stallTorque: 2.08 },
+    // Spark Mini + NeveRest Motors (AndyMark)
+    spark_neverest_20: { name: 'Spark Mini + NeveRest 20 (537 RPM)', brand: 'Spark Mini', rpm: 537, ticksPerRev: 537.6, stallTorque: 0.69 },
+    spark_neverest_40: { name: 'Spark Mini + NeveRest 40 (269 RPM)', brand: 'Spark Mini', rpm: 269, ticksPerRev: 1120, stallTorque: 1.38 },
+    spark_neverest_60: { name: 'Spark Mini + NeveRest 60 (179 RPM)', brand: 'Spark Mini', rpm: 179, ticksPerRev: 1680, stallTorque: 2.07 },
+    spark_neverest_3_7: { name: 'Spark Mini + NeveRest 3.7 (1780 RPM)', brand: 'Spark Mini', rpm: 1780, ticksPerRev: 103.6, stallTorque: 0.17 },
+    spark_neverest_orbital_20: { name: 'Spark Mini + NeveRest Orbital 20 (340 RPM)', brand: 'Spark Mini', rpm: 340, ticksPerRev: 537.6, stallTorque: 1.1 },
+    // Spark Mini + Generic/Other Motors
+    spark_hd_hex_40: { name: 'Spark Mini + HD Hex 40:1 (150 RPM)', brand: 'Spark Mini', rpm: 150, ticksPerRev: 1120, stallTorque: 3.2 },
+    spark_hd_hex_20: { name: 'Spark Mini + HD Hex 20:1 (300 RPM)', brand: 'Spark Mini', rpm: 300, ticksPerRev: 560, stallTorque: 1.6 },
+    spark_core_hex: { name: 'Spark Mini + Core Hex (125 RPM)', brand: 'Spark Mini', rpm: 125, ticksPerRev: 288, stallTorque: 3.2 },
+    spark_generic_no_encoder: { name: 'Spark Mini + DC Motor (no encoder)', brand: 'Spark Mini', rpm: 0, ticksPerRev: 0, stallTorque: 0 }
+  };
+
+  // Servo Database
+  const servoDatabase = {
+    // GoBilda Servos
+    gobilda_speed: { name: 'GoBilda Speed Servo (2000-0025)', brand: 'GoBilda', speed: 0.055, torque: 21.0, range: 300 },
+    gobilda_torque: { name: 'GoBilda Torque Servo (2000-0025)', brand: 'GoBilda', speed: 0.11, torque: 42.0, range: 300 },
+    gobilda_super_speed: { name: 'GoBilda Super Speed Servo', brand: 'GoBilda', speed: 0.035, torque: 14.0, range: 300 },
+    // REV Servos
+    rev_smart_servo: { name: 'REV Smart Robot Servo', brand: 'REV', speed: 0.14, torque: 13.5, range: 280 },
+    rev_srs_continuous: { name: 'REV SRS Continuous Rotation', brand: 'REV', speed: 0.14, torque: 13.5, range: 360 },
+    // Axon Servos
+    axon_max: { name: 'Axon MAX+ Servo', brand: 'Axon', speed: 0.065, torque: 52.0, range: 355 },
+    axon_mini: { name: 'Axon Mini Servo', brand: 'Axon', speed: 0.08, torque: 25.0, range: 355 }
+  };
+
+  // Blinkin LED Pattern Database
+  // Formula: FTC_Value = (Pulse_Width_in_microseconds - 600) / 1800
+  const blinkinDatabase = {
+    // Solid Colors
+    solid_red: { name: 'Solid Red', pulse: 1805, ftcValue: 0.669 },
+    solid_orange: { name: 'Solid Orange', pulse: 1825, ftcValue: 0.681 },
+    solid_yellow: { name: 'Solid Yellow', pulse: 1845, ftcValue: 0.692 },
+    solid_green: { name: 'Solid Green', pulse: 1885, ftcValue: 0.714 },
+    solid_blue: { name: 'Solid Blue', pulse: 1935, ftcValue: 0.742 },
+    solid_violet: { name: 'Solid Violet', pulse: 1955, ftcValue: 0.753 },
+    solid_white: { name: 'Solid White', pulse: 1975, ftcValue: 0.764 },
+    solid_black: { name: 'Off / Black', pulse: 1995, ftcValue: 0.775 },
+    // Rainbow patterns
+    rainbow: { name: 'Rainbow', pulse: 1005, ftcValue: 0.225 },
+    rainbow_party: { name: 'Rainbow Party', pulse: 1015, ftcValue: 0.231 },
+    rainbow_ocean: { name: 'Rainbow Ocean', pulse: 1025, ftcValue: 0.236 },
+    rainbow_lava: { name: 'Rainbow Lava', pulse: 1035, ftcValue: 0.242 },
+    rainbow_forest: { name: 'Rainbow Forest', pulse: 1045, ftcValue: 0.247 },
+    // Strobe patterns
+    strobe_red: { name: 'Strobe Red', pulse: 1785, ftcValue: 0.658 },
+    strobe_blue: { name: 'Strobe Blue', pulse: 1795, ftcValue: 0.664 },
+    // Breath patterns
+    breath_red: { name: 'Breath Red', pulse: 1545, ftcValue: 0.525 },
+    breath_blue: { name: 'Breath Blue', pulse: 1555, ftcValue: 0.531 },
+    // Heartbeat patterns
+    heartbeat_red: { name: 'Heartbeat Red', pulse: 1565, ftcValue: 0.536 },
+    heartbeat_blue: { name: 'Heartbeat Blue', pulse: 1575, ftcValue: 0.542 },
+    // Two-color patterns
+    sparkle_1on2: { name: 'Sparkle 1 on 2', pulse: 1685, ftcValue: 0.603 },
+    sparkle_2on1: { name: 'Sparkle 2 on 1', pulse: 1695, ftcValue: 0.608 },
+    bpm_rainbow: { name: 'BPM Rainbow', pulse: 1055, ftcValue: 0.253 },
+    bpm_ocean: { name: 'BPM Ocean', pulse: 1075, ftcValue: 0.264 },
+    fire_medium: { name: 'Fire Medium', pulse: 1215, ftcValue: 0.342 },
+    fire_large: { name: 'Fire Large', pulse: 1225, ftcValue: 0.347 }
+  };
+
+  // Sensor Database
+  const sensorDatabase = {
+    // REV Sensors
+    rev_color_v3: { name: 'REV Color Sensor V3', brand: 'REV', type: 'color', interface: 'i2c' },
+    rev_2m_distance: { name: 'REV 2M Distance Sensor', brand: 'REV', type: 'distance', interface: 'i2c' },
+    rev_touch: { name: 'REV Touch Sensor', brand: 'REV', type: 'touch', interface: 'digital' },
+    rev_magnetic_limit: { name: 'REV Magnetic Limit Switch', brand: 'REV', type: 'limit', interface: 'digital' },
+    rev_potentiometer: { name: 'REV Potentiometer', brand: 'REV', type: 'analog', interface: 'analog' },
+    // GoBilda/Modern Robotics
+    mr_color: { name: 'Modern Robotics Color Sensor', brand: 'MR', type: 'color', interface: 'i2c' },
+    mr_gyro: { name: 'Modern Robotics Gyro', brand: 'MR', type: 'gyro', interface: 'i2c' },
+    // Generic
+    generic_limit: { name: 'Generic Limit Switch', brand: 'Generic', type: 'limit', interface: 'digital' },
+    generic_encoder: { name: 'Generic Encoder', brand: 'Generic', type: 'encoder', interface: 'encoder' }
+  };
+
+  // Calculate offsets from center
+  const calculateOffsets = () => {
+    const centerX = robotWidth / 2;
+    const centerY = robotLength / 2;
+
+    // Odometry Pod 1 (Forward/Back)
+    const odo1XOffset = odo1FromRight - centerX;
+    const odo1YOffset = odo1FromBack - centerY;
+
+    // Odometry Pod 2 (Left/Right)
+    const odo2XOffset = odo2FromRight - centerX;
+    const odo2YOffset = odo2FromBack - centerY;
+
+    // Limelight
+    const limelightXOffset = limelightFromRight - centerX;
+    const limelightYOffset = limelightFromBack - centerY;
+
+    return {
+      odo1: { x: odo1XOffset, y: odo1YOffset },
+      odo2: { x: odo2XOffset, y: odo2YOffset },
+      limelight: { x: limelightXOffset, y: limelightYOffset }
+    };
+  };
+
+  const offsets = calculateOffsets();
+  const odo1Specs = odoDatabase[odo1Type];
+  const odo2Specs = odoDatabase[odo2Type];
+
+  // Validation function
+  const getValidationWarnings = () => {
+    const warnings = [];
+    
+    // Combine all motors for conflict checking
+    const allMotors = [...motors, ...auxMotors];
+    
+    // Check for motor port conflicts (all motors)
+    allMotors.forEach((m1, i) => {
+      allMotors.forEach((m2, j) => {
+        if (i < j && m1.hub === m2.hub && m1.port === m2.port) {
+          warnings.push({ type: 'error', message: `Motor conflict: "${m1.name}" and "${m2.name}" both on ${m1.hub} hub port ${m1.port}` });
+        }
+      });
+    });
+    
+    // Check for servo port conflicts
+    servos.forEach((s1, i) => {
+      servos.forEach((s2, j) => {
+        if (i < j && s1.hub === s2.hub && s1.port === s2.port) {
+          warnings.push({ type: 'error', message: `Servo conflict: "${s1.name}" and "${s2.name}" both on ${s1.hub} hub port ${s1.port}` });
+        }
+      });
+    });
+
+    // Check for Blinkin on same port as servo
+    if (hasBlinkin) {
+      const conflictingServo = servos.find(s => s.hub === blinkinPort.hub && s.port === blinkinPort.port);
+      if (conflictingServo) {
+        warnings.push({ type: 'error', message: `Blinkin conflicts with servo "${conflictingServo.name}" on ${blinkinPort.hub} hub port ${blinkinPort.port}` });
+      }
+    }
+    
+    // Check for missing drive motors
+    const driveMotorNames = ['frontLeft', 'frontRight', 'backLeft', 'backRight'];
+    const missingDrive = driveMotorNames.filter(name => !motors.find(m => m.name.toLowerCase() === name.toLowerCase()));
+    if (missingDrive.length > 0 && motors.length > 0) {
+      warnings.push({ type: 'warning', message: `Possible missing drive motors: ${missingDrive.join(', ')}` });
+    }
+    
+    // Check if no drive motors configured
+    if (motors.length === 0) {
+      warnings.push({ type: 'warning', message: 'No drive motors configured' });
+    }
+    
+    // Check odometry pod port conflicts
+    if (odo1Port.hub === odo2Port.hub && odo1Port.port === odo2Port.port) {
+      warnings.push({ type: 'error', message: `Odometry pods both on ${odo1Port.hub} hub port ${odo1Port.port}` });
+    }
+    
+    // Check if robot dimensions are reasonable
+    if (robotLength < 10 || robotLength > 24) {
+      warnings.push({ type: 'warning', message: `Robot length ${robotLength}" seems unusual (typical: 12-18")` });
+    }
+    if (robotWidth < 10 || robotWidth > 24) {
+      warnings.push({ type: 'warning', message: `Robot width ${robotWidth}" seems unusual (typical: 12-18")` });
+    }
+    
+    // Check sensor port conflicts
+    sensors.forEach((s1, i) => {
+      sensors.forEach((s2, j) => {
+        if (i < j && s1.hub === s2.hub && s1.interface === s2.interface && s1.port === s2.port) {
+          warnings.push({ type: 'error', message: `Sensor conflict: "${s1.name}" and "${s2.name}" both on ${s1.hub} hub ${s1.interface} port ${s1.port}` });
+        }
+      });
+    });
+    
+    return warnings;
+  };
+
+  const validationWarnings = getValidationWarnings();
+
+  // Save configuration
+  const saveConfig = () => {
+    const config = {
+      name: robotName,
+      savedAt: new Date().toISOString(),
+      robotLength, robotWidth,
+      wheelBrand, wheelType, wheelSize,
+      odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
+      odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      imuLocation, imuLogoDirection, imuUsbDirection,
+      limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
+      motors, auxMotors, servos, hasExpansionHub,
+      hasBlinkin, blinkinPort, blinkinPatterns,
+      sensors, aprilTagSize, targetTags
+    };
+    
+    const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
+    let newConfigs;
+    if (existingIndex >= 0) {
+      newConfigs = [...savedConfigs];
+      newConfigs[existingIndex] = config;
+    } else {
+      newConfigs = [...savedConfigs, config];
+    }
+    
+    setSavedConfigs(newConfigs);
+    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+    setShowSaveModal(false);
+  };
+
+  // Load configuration
+  const loadConfig = (config) => {
+    setRobotName(config.name || 'My Robot');
+    setRobotLength(config.robotLength || 18);
+    setRobotWidth(config.robotWidth || 18);
+    setWheelBrand(config.wheelBrand || 'gobilda');
+    setWheelType(config.wheelType || 'mecanum');
+    setWheelSize(config.wheelSize || 104);
+    setOdo1Type(config.odo1Type || 'gobilda_4bar');
+    setOdo1FromBack(config.odo1FromBack || 9);
+    setOdo1FromRight(config.odo1FromRight || 9);
+    setOdo1Reversed(config.odo1Reversed || false);
+    setOdo1Measures(config.odo1Measures || 'forward_back');
+    setOdo1Port(config.odo1Port || { hub: 'control', port: 0 });
+    setOdo2Type(config.odo2Type || 'gobilda_4bar');
+    setOdo2FromBack(config.odo2FromBack || 9);
+    setOdo2FromRight(config.odo2FromRight || 9);
+    setOdo2Reversed(config.odo2Reversed || false);
+    setOdo2Measures(config.odo2Measures || 'left_right');
+    setOdo2Port(config.odo2Port || { hub: 'control', port: 1 });
+    setImuLocation(config.imuLocation || 'control_hub');
+    setImuLogoDirection(config.imuLogoDirection || 'UP');
+    setImuUsbDirection(config.imuUsbDirection || 'FORWARD');
+    setLimelightVersion(config.limelightVersion || '3a');
+    setLimelightFromBack(config.limelightFromBack || 9);
+    setLimelightFromRight(config.limelightFromRight || 9);
+    setLimelightHeight(config.limelightHeight || 8);
+    setLimelightFacing(config.limelightFacing || 'FORWARD');
+    setMotors(config.motors || []);
+    setAuxMotors(config.auxMotors || []);
+    setServos(config.servos || []);
+    setHasExpansionHub(config.hasExpansionHub || false);
+    setHasBlinkin(config.hasBlinkin || false);
+    setBlinkinPort(config.blinkinPort || { hub: 'control', port: 0 });
+    setBlinkinPatterns(config.blinkinPatterns || []);
+    setSensors(config.sensors || []);
+    setAprilTagSize(config.aprilTagSize || 165);
+    setTargetTags(config.targetTags || []);
+    setShowLoadModal(false);
+  };
+
+  // Delete saved configuration
+  const deleteConfig = (configName) => {
+    const newConfigs = savedConfigs.filter(c => c.name !== configName);
+    setSavedConfigs(newConfigs);
+    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+  };
+
+  // Export configuration as JSON file
+  const exportConfig = () => {
+    const config = {
+      name: robotName,
+      exportedAt: new Date().toISOString(),
+      version: '2.0',
+      robotLength, robotWidth,
+      wheelBrand, wheelType, wheelSize,
+      odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
+      odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      imuLocation, imuLogoDirection, imuUsbDirection,
+      limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
+      motors, auxMotors, servos, hasExpansionHub,
+      hasBlinkin, blinkinPort, blinkinPatterns,
+      sensors, aprilTagSize, targetTags
+    };
+    
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${robotName.replace(/\s+/g, '_')}_config.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Import configuration from JSON file
+  const importConfig = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const config = JSON.parse(e.target.result);
+          loadConfig(config);
+        } catch (err) {
+          alert('Invalid configuration file');
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // Print DS Config
+  const printDSConfig = () => {
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${robotName} - Driver Station Configuration</title>
+          <style>
+            body { font-family: monospace; padding: 20px; font-size: 12px; }
+            h1 { font-size: 18px; }
+            h2 { font-size: 14px; margin-top: 20px; border-bottom: 1px solid #000; }
+            pre { white-space: pre-wrap; }
+            @media print { body { padding: 0; } }
+          </style>
+        </head>
+        <body>
+          <h1>${robotName} - Driver Station Configuration</h1>
+          <pre>${generateDriverStationConfig()}</pre>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.print();
+  };
+
+  // Generate code snippet
+  const generateCodeSnippet = () => {
+    const driveMotorCode = motors.map(m => 
+      `${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
+${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`
+    ).join('\n');
+
+    const auxMotorCode = auxMotors.map(m => 
+      `${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
+${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`
+    ).join('\n');
+
+    const servoCode = servos.map(s => 
+      `${s.name} = hardwareMap.get(Servo.class, "${s.name}");`
+    ).join('\n');
+
+    return `// ============================================
+// FTC Robot Configuration
+// Generated by FTC Robot Configurator
+// ============================================
+
+// ----- ROBOT DIMENSIONS -----
+// Length: ${robotLength} inches
+// Width: ${robotWidth} inches
+
+// ----- DRIVE WHEELS -----
+// Brand: ${wheelBrand === 'gobilda' ? 'GoBilda' : 'REV Robotics'}
+// Type: ${wheelType.charAt(0).toUpperCase() + wheelType.slice(1)}
+// Size: ${wheelSize}mm
+
+// ----- DRIVE MOTORS -----
+// Declarations
+${motors.map(m => `private DcMotor ${m.name};  // ${motorDatabase[m.type]?.name}`).join('\n')}
+
+// Initialization (in init)
+${driveMotorCode}
+
+${auxMotors.length > 0 ? `// ----- OTHER MOTORS (arm, intake, etc.) -----
+// Declarations
+${auxMotors.map(m => `private DcMotor ${m.name};  // ${motorDatabase[m.type]?.name}`).join('\n')}
+
+// Initialization (in init)
+${auxMotorCode}
+` : '// No auxiliary motors configured'}
+
+// ----- SERVOS -----
+${servos.length > 0 ? `// Declarations
+${servos.map(s => `private Servo ${s.name};  // ${servoDatabase[s.type]?.name}`).join('\n')}
+
+// Initialization (in init)
+${servoCode}` : '// No servos configured'}
+
+// ----- ODOMETRY CONFIGURATION -----
+// Formula: FTC_Ticks_Per_Inch = CPR / (wheel_diameter_mm * PI) * 25.4
+
+// Pod 1: ${odo1Measures === 'forward_back' ? 'Forward/Back' : 'Left/Right (Strafe)'} (${odo1Specs.name})
+// Encoder port: ${odo1Port.hub} hub, port ${odo1Port.port}
+private static final double ODO_POD1_TICKS_PER_INCH = ${odo1Specs.ticksPerInch.toFixed(1)};
+private static final double ODO_POD1_X_OFFSET = ${offsets.odo1.x.toFixed(3)};  // inches from center (+ right, - left)
+private static final double ODO_POD1_Y_OFFSET = ${offsets.odo1.y.toFixed(3)};  // inches from center (+ forward, - back)
+private static final boolean ODO_POD1_REVERSED = ${odo1Reversed};
+private static final String ODO_POD1_MEASURES = "${odo1Measures === 'forward_back' ? 'FORWARD_BACK' : 'LEFT_RIGHT'}";
+
+// Pod 2: ${odo2Measures === 'forward_back' ? 'Forward/Back' : 'Left/Right (Strafe)'} (${odo2Specs.name})
+// Encoder port: ${odo2Port.hub} hub, port ${odo2Port.port}
+private static final double ODO_POD2_TICKS_PER_INCH = ${odo2Specs.ticksPerInch.toFixed(1)};
+private static final double ODO_POD2_X_OFFSET = ${offsets.odo2.x.toFixed(3)};  // inches from center (+ right, - left)
+private static final double ODO_POD2_Y_OFFSET = ${offsets.odo2.y.toFixed(3)};  // inches from center (+ forward, - back)
+private static final boolean ODO_POD2_REVERSED = ${odo2Reversed};
+private static final String ODO_POD2_MEASURES = "${odo2Measures === 'forward_back' ? 'FORWARD_BACK' : 'LEFT_RIGHT'}";
+
+// ----- IMU CONFIGURATION -----
+// Location: ${imuLocation === 'control_hub' ? 'Control Hub' : 'Expansion Hub'}
+RevHubOrientationOnRobot.LogoFacingDirection logoDirection = RevHubOrientationOnRobot.LogoFacingDirection.${imuLogoDirection};
+RevHubOrientationOnRobot.UsbFacingDirection usbDirection = RevHubOrientationOnRobot.UsbFacingDirection.${imuUsbDirection};
+RevHubOrientationOnRobot orientationOnRobot = new RevHubOrientationOnRobot(logoDirection, usbDirection);
+imu.initialize(new IMU.Parameters(orientationOnRobot));
+
+// ----- LIMELIGHT CONFIGURATION -----
+// Version: Limelight ${limelightVersion.toUpperCase()}
+// Facing: ${limelightFacing}
+private static final double LIMELIGHT_X_OFFSET = ${offsets.limelight.x.toFixed(3)};  // inches from center
+private static final double LIMELIGHT_Y_OFFSET = ${offsets.limelight.y.toFixed(3)};  // inches from center
+private static final double LIMELIGHT_HEIGHT = ${limelightHeight};  // inches from ground
+
+// ----- APRILTAG CONFIGURATION -----
+private static final double APRILTAG_SIZE_MM = ${aprilTagSize};  // ${(aprilTagSize / 25.4).toFixed(2)} inches
+${targetTags.map(t => `private static final int TAG_${t.name.toUpperCase().replace(/\s+/g, '_')} = ${t.tagId};  // ${t.name}`).join('\n')}
+
+${hasBlinkin ? `// ----- BLINKIN LED CONFIGURATION -----
+// Formula: FTC_Value = (Pulse_Width - 600) / 1800
+private Servo blinkin;  // Configured on ${blinkinPort.hub} hub, port ${blinkinPort.port}
+
+// Pattern constants
+${blinkinPatterns.map(p => `private static final double BLINKIN_${p.name.toUpperCase().replace(/\s+/g, '_')} = ${blinkinDatabase[p.pattern]?.ftcValue.toFixed(3)};  // ${blinkinDatabase[p.pattern]?.name}`).join('\n')}
+
+// Blinkin initialization
+blinkin = hardwareMap.get(Servo.class, "blinkin");
+` : '// No Blinkin configured'}
+
+${sensors.length > 0 ? `// ----- SENSORS -----
+${sensors.map(s => {
+  const sensorInfo = sensorDatabase[s.type];
+  if (sensorInfo?.interface === 'i2c') {
+    return `// ${s.name} - ${sensorInfo.name} (I2C, ${s.hub} hub port ${s.port})
+// ${s.name} = hardwareMap.get(${sensorInfo.type === 'color' ? 'ColorSensor' : sensorInfo.type === 'distance' ? 'DistanceSensor' : 'I2cDevice'}.class, "${s.name}");`;
+  } else if (sensorInfo?.interface === 'digital') {
+    return `// ${s.name} - ${sensorInfo.name} (Digital, ${s.hub} hub port ${s.port})
+// ${s.name} = hardwareMap.get(DigitalChannel.class, "${s.name}");`;
+  } else if (sensorInfo?.interface === 'analog') {
+    return `// ${s.name} - ${sensorInfo.name} (Analog, ${s.hub} hub port ${s.port})
+// ${s.name} = hardwareMap.get(AnalogInput.class, "${s.name}");`;
+  }
+  return `// ${s.name} - ${sensorInfo?.name || 'Unknown'}`;
+}).join('\n\n')}
+` : '// No sensors configured'}
+`;
+  };
+
+  // Generate Driver Station Configuration
+  const generateDriverStationConfig = () => {
+    const controlDriveMotors = motors.filter(m => m.hub === 'control');
+    const expansionDriveMotors = motors.filter(m => m.hub === 'expansion');
+    const controlAuxMotors = auxMotors.filter(m => m.hub === 'control');
+    const expansionAuxMotors = auxMotors.filter(m => m.hub === 'expansion');
+    const allControlMotors = [...controlDriveMotors, ...controlAuxMotors];
+    const allExpansionMotors = [...expansionDriveMotors, ...expansionAuxMotors];
+    const controlServos = servos.filter(s => s.hub === 'control');
+    const expansionServos = servos.filter(s => s.hub === 'expansion');
+
+    return `========================================
+DRIVER STATION CONFIGURATION GUIDE
+========================================
+
+1. Open the Driver Station app
+2. Tap the three dots (⋮) menu → Configure Robot
+3. Tap "New" or edit your existing configuration
+4. Tap "Scan" to detect connected hubs
+
+========================================
+CONTROL HUB CONFIGURATION
+========================================
+
+MOTORS (Ports 0-3):
+──────────────────────────────────────
+${[0,1,2,3].map(port => {
+  const motor = allControlMotors.find(m => m.port === port);
+  if (motor) {
+    const isDrive = controlDriveMotors.includes(motor);
+    const motorBrand = motorDatabase[motor.type]?.brand;
+    const motorTypeStr = motorBrand === 'GoBilda' ? 'GoBilda Yellow Jacket' : 
+                         motorBrand === 'Spark Mini' ? 'Spark Mini' : 'REV';
+    return `Port ${port}: 
+  Name: "${motor.name}"${isDrive ? ' (DRIVE)' : ' (AUX)'}
+  Type: Select "${motorTypeStr}" motor
+  Direction: ${motor.reversed ? 'REVERSE' : 'FORWARD'}`;
+  }
+  return `Port ${port}: (not used)`;
+}).join('\n\n')}
+
+SERVOS (Ports 0-5):
+──────────────────────────────────────
+${[0,1,2,3,4,5].map(port => {
+  const servo = controlServos.find(s => s.port === port);
+  if (servo) {
+    return `Port ${port}: 
+  Name: "${servo.name}"
+  Type: Servo`;
+  }
+  return `Port ${port}: (not used)`;
+}).join('\n\n')}
+
+I2C BUS 0:
+──────────────────────────────────────
+Port 0: 
+  Name: "imu"
+  Type: REV Internal IMU (BHI260AP)
+
+USB DEVICES:
+──────────────────────────────────────
+Name: "limelight"
+Type: Limelight 3A
+
+ENCODER NOTES (for Odometry):
+──────────────────────────────────────
+Odometry pods plug into encoder ports (the smaller connectors on motor ports).
+
+Pod 1 (${odo1Measures === 'forward_back' ? 'Forward/Back' : 'Left/Right'}):
+  → Plug into Port ${odo1Port.port} encoder connector
+  → This shares the port with motor "${allControlMotors.find(m => m.port === odo1Port.port)?.name || '(no motor)'}"
+  
+Pod 2 (${odo2Measures === 'forward_back' ? 'Forward/Back' : 'Left/Right'}):
+  → Plug into Port ${odo2Port.port} encoder connector
+  → This shares the port with motor "${allControlMotors.find(m => m.port === odo2Port.port)?.name || '(no motor)'}"
+
+Note: In your code, you'll read odometry from the motor's encoder:
+  ${allControlMotors.find(m => m.port === odo1Port.port)?.name || 'motor'}.getCurrentPosition() → Pod 1
+  ${allControlMotors.find(m => m.port === odo2Port.port)?.name || 'motor'}.getCurrentPosition() → Pod 2
+
+${hasExpansionHub ? `
+========================================
+EXPANSION HUB CONFIGURATION
+========================================
+
+MOTORS (Ports 0-3):
+──────────────────────────────────────
+${[0,1,2,3].map(port => {
+  const motor = allExpansionMotors.find(m => m.port === port);
+  if (motor) {
+    const isDrive = expansionDriveMotors.includes(motor);
+    const motorBrand = motorDatabase[motor.type]?.brand;
+    const motorTypeStr = motorBrand === 'GoBilda' ? 'GoBilda Yellow Jacket' : 
+                         motorBrand === 'Spark Mini' ? 'Spark Mini' : 'REV';
+    return `Port ${port}: 
+  Name: "${motor.name}"${isDrive ? ' (DRIVE)' : ' (AUX)'}
+  Type: Select "${motorTypeStr}" motor
+  Direction: ${motor.reversed ? 'REVERSE' : 'FORWARD'}`;
+  }
+  return `Port ${port}: (not used)`;
+}).join('\n\n')}
+
+SERVOS (Ports 0-5):
+──────────────────────────────────────
+${[0,1,2,3,4,5].map(port => {
+  const servo = expansionServos.find(s => s.port === port);
+  if (servo) {
+    return `Port ${port}: 
+  Name: "${servo.name}"
+  Type: Servo`;
+  }
+  return `Port ${port}: (not used)`;
+}).join('\n\n')}
+` : ''}
+${hasBlinkin ? `
+========================================
+BLINKIN LED CONTROLLER
+========================================
+
+Servo Port: ${blinkinPort.hub} hub, port ${blinkinPort.port}
+Name: "blinkin"
+Type: Servo
+
+LED Patterns configured:
+${blinkinPatterns.map(p => `  • ${p.name}: ${blinkinDatabase[p.pattern]?.name} (value: ${blinkinDatabase[p.pattern]?.ftcValue.toFixed(3)})`).join('\n')}
+` : ''}
+${sensors.length > 0 ? `
+========================================
+SENSORS
+========================================
+
+${sensors.map(s => {
+  const sensorInfo = sensorDatabase[s.type];
+  return `${sensorInfo?.name}:
+  Name: "${s.name}"
+  Hub: ${s.hub}
+  Interface: ${sensorInfo?.interface?.toUpperCase()}
+  Port: ${s.port}`;
+}).join('\n\n')}
+` : ''}
+========================================
+APRILTAG CONFIGURATION
+========================================
+
+Tag Size: ${aprilTagSize}mm (${(aprilTagSize / 25.4).toFixed(2)} inches)
+  → Configure this in Limelight web interface
+
+Target Tags:
+${targetTags.map(t => `  • Tag ID ${t.tagId}: ${t.name}`).join('\n')}
+
+========================================
+AFTER CONFIGURATION
+========================================
+
+1. Tap "Save" and give your configuration a name
+2. The configuration will now be active
+3. Test by running a simple TeleOp to verify all motors and servos respond
+
+========================================
+IMU ORIENTATION REMINDER
+========================================
+
+Your Control Hub is mounted with:
+  • REV Logo facing: ${imuLogoDirection}
+  • USB Port facing: ${imuUsbDirection}
+
+Make sure your code initializes the IMU with these orientations!
+`;
+  };
+
+  // Tab content renderer
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case 'dimensions':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Robot Dimensions</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Length (inches)</label>
+                <input
+                  type="number"
+                  value={robotLength}
+                  onChange={(e) => setRobotLength(parseFloat(e.target.value) || 0)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                  step="0.5"
+                />
+                <span className="text-xs text-gray-400">Front to back</span>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Width (inches)</label>
+                <input
+                  type="number"
+                  value={robotWidth}
+                  onChange={(e) => setRobotWidth(parseFloat(e.target.value) || 0)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                  step="0.5"
+                />
+                <span className="text-xs text-gray-400">Left to right</span>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'wheels':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Drive Wheels</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Brand</label>
+                <select
+                  value={wheelBrand}
+                  onChange={(e) => {
+                    setWheelBrand(e.target.value);
+                    const firstWheel = wheelDatabase[e.target.value][wheelType]?.[0];
+                    if (firstWheel) setWheelSize(firstWheel.size);
+                  }}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="gobilda">GoBilda</option>
+                  <option value="rev">REV Robotics</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Type</label>
+                <select
+                  value={wheelType}
+                  onChange={(e) => {
+                    setWheelType(e.target.value);
+                    const firstWheel = wheelDatabase[wheelBrand][e.target.value]?.[0];
+                    if (firstWheel) setWheelSize(firstWheel.size);
+                  }}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="mecanum">Mecanum</option>
+                  <option value="omni">Omni</option>
+                  <option value="traction">Traction</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Size</label>
+                <select
+                  value={wheelSize}
+                  onChange={(e) => setWheelSize(parseInt(e.target.value))}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  {wheelDatabase[wheelBrand][wheelType]?.map((wheel) => (
+                    <option key={wheel.size} value={wheel.size}>
+                      {wheel.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'odometry':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Odometry Pods</h3>
+            
+            {/* Pod 1 */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Pod 1</h4>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">This pod measures</label>
+                  <select
+                    value={odo1Measures}
+                    onChange={(e) => setOdo1Measures(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value="forward_back">Forward / Back movement</option>
+                    <option value="left_right">Left / Right movement (strafe)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">Pod Type</label>
+                  <select
+                    value={odo1Type}
+                    onChange={(e) => setOdo1Type(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value="gobilda_4bar">GoBilda 4-Bar Pod (32mm, 2000 CPR)</option>
+                    <option value="gobilda_swingarm">GoBilda Swingarm Pod (48mm, 2000 CPR)</option>
+                    <option value="rev_throughbore">REV Through Bore + Dead Wheel (35mm, 8192 CPR)</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-1">From Back (in)</label>
+                    <input
+                      type="number"
+                      value={odo1FromBack}
+                      onChange={(e) => setOdo1FromBack(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      step="0.125"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-1">From Right (in)</label>
+                    <input
+                      type="number"
+                      value={odo1FromRight}
+                      onChange={(e) => setOdo1FromRight(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      step="0.125"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center space-x-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={odo1Reversed}
+                    onChange={(e) => setOdo1Reversed(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <span className="text-gray-300">Reverse Direction</span>
+                </label>
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">Encoder Port</label>
+                  <div className="flex gap-2">
+                    <select
+                      value={odo1Port.hub}
+                      onChange={(e) => setOdo1Port({...odo1Port, hub: e.target.value})}
+                      className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      <option value="control">Control Hub</option>
+                      {hasExpansionHub && <option value="expansion">Expansion Hub</option>}
+                    </select>
+                    <select
+                      value={odo1Port.port}
+                      onChange={(e) => setOdo1Port({...odo1Port, port: parseInt(e.target.value)})}
+                      className="w-24 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      {[0,1,2,3].map(p => <option key={p} value={p}>Port {p}</option>)}
+                    </select>
+                  </div>
+                  <span className="text-xs text-gray-400">Plug into encoder pins on this motor port</span>
+                </div>
+                <div className="text-sm text-gray-400">
+                  Ticks per inch: <span className="text-green-400 font-mono">{odo1Specs.ticksPerInch.toFixed(1)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Pod 2 */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-purple-400 mb-3">Pod 2</h4>
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">This pod measures</label>
+                  <select
+                    value={odo2Measures}
+                    onChange={(e) => setOdo2Measures(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value="forward_back">Forward / Back movement</option>
+                    <option value="left_right">Left / Right movement (strafe)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">Pod Type</label>
+                  <select
+                    value={odo2Type}
+                    onChange={(e) => setOdo2Type(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  >
+                    <option value="gobilda_4bar">GoBilda 4-Bar Pod (32mm, 2000 CPR)</option>
+                    <option value="gobilda_swingarm">GoBilda Swingarm Pod (48mm, 2000 CPR)</option>
+                    <option value="rev_throughbore">REV Through Bore + Dead Wheel (35mm, 8192 CPR)</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-1">From Back (in)</label>
+                    <input
+                      type="number"
+                      value={odo2FromBack}
+                      onChange={(e) => setOdo2FromBack(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      step="0.125"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-gray-300 mb-1">From Right (in)</label>
+                    <input
+                      type="number"
+                      value={odo2FromRight}
+                      onChange={(e) => setOdo2FromRight(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      step="0.125"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center space-x-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={odo2Reversed}
+                    onChange={(e) => setOdo2Reversed(e.target.checked)}
+                    className="form-checkbox h-5 w-5 text-green-500 rounded"
+                  />
+                  <span className="text-gray-300">Reverse Direction</span>
+                </label>
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">Encoder Port</label>
+                  <div className="flex gap-2">
+                    <select
+                      value={odo2Port.hub}
+                      onChange={(e) => setOdo2Port({...odo2Port, hub: e.target.value})}
+                      className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      <option value="control">Control Hub</option>
+                      {hasExpansionHub && <option value="expansion">Expansion Hub</option>}
+                    </select>
+                    <select
+                      value={odo2Port.port}
+                      onChange={(e) => setOdo2Port({...odo2Port, port: parseInt(e.target.value)})}
+                      className="w-24 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      {[0,1,2,3].map(p => <option key={p} value={p}>Port {p}</option>)}
+                    </select>
+                  </div>
+                  <span className="text-xs text-gray-400">Plug into encoder pins on this motor port</span>
+                </div>
+                <div className="text-sm text-gray-400">
+                  Ticks per inch: <span className="text-green-400 font-mono">{odo2Specs.ticksPerInch.toFixed(1)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'imu':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">IMU Configuration</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">IMU Location</label>
+                <select
+                  value={imuLocation}
+                  onChange={(e) => setImuLocation(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="control_hub">Control Hub (BHI260AP)</option>
+                  <option value="expansion_hub">Expansion Hub (BNO055)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Logo Facing Direction</label>
+                <select
+                  value={imuLogoDirection}
+                  onChange={(e) => setImuLogoDirection(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="UP">UP</option>
+                  <option value="DOWN">DOWN</option>
+                  <option value="LEFT">LEFT</option>
+                  <option value="RIGHT">RIGHT</option>
+                  <option value="FORWARD">FORWARD</option>
+                  <option value="BACKWARD">BACKWARD</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">USB Facing Direction</label>
+                <select
+                  value={imuUsbDirection}
+                  onChange={(e) => setImuUsbDirection(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="FORWARD">FORWARD</option>
+                  <option value="BACKWARD">BACKWARD</option>
+                  <option value="LEFT">LEFT</option>
+                  <option value="RIGHT">RIGHT</option>
+                  <option value="UP">UP</option>
+                  <option value="DOWN">DOWN</option>
+                </select>
+              </div>
+              <div className="bg-gray-700 p-3 rounded text-sm text-gray-400">
+                <p className="font-semibold text-blue-400 mb-1">Tip:</p>
+                <p>Look at your Control Hub. Which way is the REV logo facing? Which way is the USB port facing?</p>
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'limelight':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Limelight Configuration</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Limelight Version</label>
+                <select
+                  value={limelightVersion}
+                  onChange={(e) => setLimelightVersion(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="2">Limelight 2</option>
+                  <option value="3">Limelight 3</option>
+                  <option value="3a">Limelight 3A</option>
+                  <option value="4">Limelight 4</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Camera Facing</label>
+                <select
+                  value={limelightFacing}
+                  onChange={(e) => setLimelightFacing(e.target.value)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                >
+                  <option value="FORWARD">FORWARD</option>
+                  <option value="BACKWARD">BACKWARD</option>
+                  <option value="LEFT">LEFT</option>
+                  <option value="RIGHT">RIGHT</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">From Back (in)</label>
+                  <input
+                    type="number"
+                    value={limelightFromBack}
+                    onChange={(e) => setLimelightFromBack(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                    step="0.125"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-300 mb-1">From Right (in)</label>
+                  <input
+                    type="number"
+                    value={limelightFromRight}
+                    onChange={(e) => setLimelightFromRight(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                    step="0.125"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300 mb-1">Height from Ground (in)</label>
+                <input
+                  type="number"
+                  value={limelightHeight}
+                  onChange={(e) => setLimelightHeight(parseFloat(e.target.value) || 0)}
+                  className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+                  step="0.125"
+                />
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'drive':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Drive Motors</h3>
+              <button
+                onClick={() => {
+                  const newId = motors.length > 0 ? Math.max(...motors.map(m => m.id)) + 1 : 1;
+                  setMotors([...motors, { 
+                    id: newId, 
+                    name: `motor${newId}`, 
+                    type: 'gobilda_5203_26_9', 
+                    hub: 'control', 
+                    port: 0, 
+                    reversed: false 
+                  }]);
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+              >
+                + Add Motor
+              </button>
+            </div>
+            
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {motors.map((motor, index) => (
+                <div key={motor.id} className="bg-gray-700 p-3 rounded-lg">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-blue-400 font-semibold">Motor {index + 1}</span>
+                    <button
+                      onClick={() => setMotors(motors.filter(m => m.id !== motor.id))}
+                      className="text-red-400 hover:text-red-300 text-sm"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">Name</label>
+                      <input
+                        type="text"
+                        value={motor.name}
+                        onChange={(e) => {
+                          const updated = motors.map(m => 
+                            m.id === motor.id ? {...m, name: e.target.value} : m
+                          );
+                          setMotors(updated);
+                        }}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">Hub / Port</label>
+                      <div className="flex gap-1">
+                        <select
+                          value={motor.hub}
+                          onChange={(e) => {
+                            const updated = motors.map(m => 
+                              m.id === motor.id ? {...m, hub: e.target.value} : m
+                            );
+                            setMotors(updated);
+                          }}
+                          className="flex-1 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <option value="control">Control</option>
+                          {hasExpansionHub && <option value="expansion">Expansion</option>}
+                        </select>
+                        <select
+                          value={motor.port}
+                          onChange={(e) => {
+                            const updated = motors.map(m => 
+                              m.id === motor.id ? {...m, port: parseInt(e.target.value)} : m
+                            );
+                            setMotors(updated);
+                          }}
+                          className="w-16 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          {[0,1,2,3].map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-xs text-gray-400 mb-1">Motor Type</label>
+                      <select
+                        value={motor.type}
+                        onChange={(e) => {
+                          const updated = motors.map(m => 
+                            m.id === motor.id ? {...m, type: e.target.value} : m
+                          );
+                          setMotors(updated);
+                        }}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      >
+                        <optgroup label="GoBilda Yellow Jacket 5203">
+                          {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('gobilda')).map(([key, motor]) => (
+                            <option key={key} value={key}>{motor.name}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="REV Robotics">
+                          {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('rev')).map(([key, motor]) => (
+                            <option key={key} value={key}>{motor.name}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Spark Mini">
+                          {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('spark')).map(([key, motor]) => (
+                            <option key={key} value={key}>{motor.name}</option>
+                          ))}
+                        </optgroup>
+                      </select>
+                    </div>
+                    <div className="col-span-2">
+                      <label className="flex items-center space-x-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={motor.reversed}
+                          onChange={(e) => {
+                            const updated = motors.map(m => 
+                              m.id === motor.id ? {...m, reversed: e.target.checked} : m
+                            );
+                            setMotors(updated);
+                          }}
+                          className="form-checkbox h-4 w-4 text-green-500 rounded"
+                        />
+                        <span className="text-gray-300 text-sm">Reverse Direction</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-400">
+                    {motorDatabase[motor.type]?.rpm} RPM | {motorDatabase[motor.type]?.ticksPerRev} ticks/rev
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-gray-700 p-3 rounded-lg">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasExpansionHub}
+                  onChange={(e) => setHasExpansionHub(e.target.checked)}
+                  className="form-checkbox h-5 w-5 text-green-500 rounded"
+                />
+                <span className="text-gray-300">Using Expansion Hub</span>
+              </label>
+            </div>
+          </div>
+        );
+
+      case 'motors':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Other Motors</h3>
+              <button
+                onClick={() => {
+                  const newId = auxMotors.length > 0 ? Math.max(...auxMotors.map(m => m.id)) + 1 : 1;
+                  setAuxMotors([...auxMotors, { 
+                    id: newId, 
+                    name: `auxMotor${newId}`, 
+                    type: 'gobilda_5203_26_9', 
+                    hub: 'expansion', 
+                    port: 0, 
+                    reversed: false 
+                  }]);
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+              >
+                + Add Motor
+              </button>
+            </div>
+            
+            <p className="text-gray-400 text-sm">Arm, intake, lift, and other non-drive motors.</p>
+
+            {auxMotors.length === 0 ? (
+              <div className="text-gray-400 text-center py-8">
+                No auxiliary motors configured. Click "+ Add Motor" to add one.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {auxMotors.map((motor, index) => (
+                  <div key={motor.id} className="bg-gray-700 p-3 rounded-lg">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-orange-400 font-semibold">Motor {index + 1}</span>
+                      <button
+                        onClick={() => setAuxMotors(auxMotors.filter(m => m.id !== motor.id))}
+                        className="text-red-400 hover:text-red-300 text-sm"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Name</label>
+                        <input
+                          type="text"
+                          value={motor.name}
+                          onChange={(e) => {
+                            const updated = auxMotors.map(m => 
+                              m.id === motor.id ? {...m, name: e.target.value} : m
+                            );
+                            setAuxMotors(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Hub / Port</label>
+                        <div className="flex gap-1">
+                          <select
+                            value={motor.hub}
+                            onChange={(e) => {
+                              const updated = auxMotors.map(m => 
+                                m.id === motor.id ? {...m, hub: e.target.value} : m
+                              );
+                              setAuxMotors(updated);
+                            }}
+                            className="flex-1 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            <option value="control">Control</option>
+                            {hasExpansionHub && <option value="expansion">Expansion</option>}
+                          </select>
+                          <select
+                            value={motor.port}
+                            onChange={(e) => {
+                              const updated = auxMotors.map(m => 
+                                m.id === motor.id ? {...m, port: parseInt(e.target.value)} : m
+                              );
+                              setAuxMotors(updated);
+                            }}
+                            className="w-16 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            {[0,1,2,3].map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-gray-400 mb-1">Motor Type</label>
+                        <select
+                          value={motor.type}
+                          onChange={(e) => {
+                            const updated = auxMotors.map(m => 
+                              m.id === motor.id ? {...m, type: e.target.value} : m
+                            );
+                            setAuxMotors(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <optgroup label="GoBilda Yellow Jacket 5203">
+                            {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('gobilda')).map(([key, motor]) => (
+                              <option key={key} value={key}>{motor.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="REV Robotics">
+                            {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('rev')).map(([key, motor]) => (
+                              <option key={key} value={key}>{motor.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="Spark Mini">
+                            {Object.entries(motorDatabase).filter(([k,v]) => k.startsWith('spark')).map(([key, motor]) => (
+                              <option key={key} value={key}>{motor.name}</option>
+                            ))}
+                          </optgroup>
+                        </select>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="flex items-center space-x-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={motor.reversed}
+                            onChange={(e) => {
+                              const updated = auxMotors.map(m => 
+                                m.id === motor.id ? {...m, reversed: e.target.checked} : m
+                              );
+                              setAuxMotors(updated);
+                            }}
+                            className="form-checkbox h-4 w-4 text-green-500 rounded"
+                          />
+                          <span className="text-gray-300 text-sm">Reverse Direction</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-400">
+                      {motorDatabase[motor.type]?.rpm} RPM | {motorDatabase[motor.type]?.ticksPerRev} ticks/rev
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
+      case 'servos':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Servos</h3>
+              <button
+                onClick={() => {
+                  const newId = servos.length > 0 ? Math.max(...servos.map(s => s.id)) + 1 : 1;
+                  setServos([...servos, { 
+                    id: newId, 
+                    name: `servo${newId}`, 
+                    type: 'gobilda_speed', 
+                    hub: 'control', 
+                    port: 0
+                  }]);
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+              >
+                + Add Servo
+              </button>
+            </div>
+            
+            {servos.length === 0 ? (
+              <div className="text-gray-400 text-center py-8">
+                No servos configured. Click "+ Add Servo" to add one.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {servos.map((servo, index) => (
+                  <div key={servo.id} className="bg-gray-700 p-3 rounded-lg">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-purple-400 font-semibold">Servo {index + 1}</span>
+                      <button
+                        onClick={() => setServos(servos.filter(s => s.id !== servo.id))}
+                        className="text-red-400 hover:text-red-300 text-sm"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Name</label>
+                        <input
+                          type="text"
+                          value={servo.name}
+                          onChange={(e) => {
+                            const updated = servos.map(s => 
+                              s.id === servo.id ? {...s, name: e.target.value} : s
+                            );
+                            setServos(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Hub / Port</label>
+                        <div className="flex gap-1">
+                          <select
+                            value={servo.hub}
+                            onChange={(e) => {
+                              const updated = servos.map(s => 
+                                s.id === servo.id ? {...s, hub: e.target.value} : s
+                              );
+                              setServos(updated);
+                            }}
+                            className="flex-1 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            <option value="control">Control</option>
+                            {hasExpansionHub && <option value="expansion">Expansion</option>}
+                          </select>
+                          <select
+                            value={servo.port}
+                            onChange={(e) => {
+                              const updated = servos.map(s => 
+                                s.id === servo.id ? {...s, port: parseInt(e.target.value)} : s
+                              );
+                              setServos(updated);
+                            }}
+                            className="w-16 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            {[0,1,2,3,4,5].map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-gray-400 mb-1">Servo Type</label>
+                        <select
+                          value={servo.type}
+                          onChange={(e) => {
+                            const updated = servos.map(s => 
+                              s.id === servo.id ? {...s, type: e.target.value} : s
+                            );
+                            setServos(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <optgroup label="GoBilda">
+                            {Object.entries(servoDatabase).filter(([k,v]) => v.brand === 'GoBilda').map(([key, servo]) => (
+                              <option key={key} value={key}>{servo.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="REV Robotics">
+                            {Object.entries(servoDatabase).filter(([k,v]) => v.brand === 'REV').map(([key, servo]) => (
+                              <option key={key} value={key}>{servo.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="Axon">
+                            {Object.entries(servoDatabase).filter(([k,v]) => v.brand === 'Axon').map(([key, servo]) => (
+                              <option key={key} value={key}>{servo.name}</option>
+                            ))}
+                          </optgroup>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-400">
+                      {servoDatabase[servo.type]?.torque} kg-cm | {servoDatabase[servo.type]?.range}° range
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
+      case 'ports':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Port Assignment</h3>
+            
+            {/* Color Legend */}
+            <div className="flex flex-wrap gap-3 text-xs">
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-blue-600 rounded"></span> Drive Motor</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-orange-600 rounded"></span> Other Motor</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-purple-600 rounded"></span> Servo</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-yellow-600 rounded"></span> Blinkin</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-3 bg-gray-600 rounded"></span> Empty</span>
+            </div>
+            
+            {/* Control Hub */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Control Hub</h4>
+              
+              {/* Motor Ports */}
+              <div className="mb-4">
+                <h5 className="text-sm font-semibold text-gray-300 mb-2">Motor Ports (0-3)</h5>
+                <div className="grid grid-cols-4 gap-2">
+                  {[0,1,2,3].map(port => {
+                    const driveMotor = motors.find(m => m.hub === 'control' && m.port === port);
+                    const auxMotor = auxMotors.find(m => m.hub === 'control' && m.port === port);
+                    const motor = driveMotor || auxMotor;
+                    const isDrive = !!driveMotor;
+                    return (
+                      <div key={port} className={`p-2 rounded text-center text-xs ${motor ? (isDrive ? 'bg-blue-600' : 'bg-orange-600') : 'bg-gray-600'}`}>
+                        <div className="font-bold">{port}</div>
+                        <div className="truncate">{motor?.name || '-'}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              
+              {/* Servo Ports */}
+              <div className="mb-4">
+                <h5 className="text-sm font-semibold text-gray-300 mb-2">Servo Ports (0-5)</h5>
+                <div className="grid grid-cols-6 gap-2">
+                  {[0,1,2,3,4,5].map(port => {
+                    const servo = servos.find(s => s.hub === 'control' && s.port === port);
+                    const isBlinkin = hasBlinkin && blinkinPort.hub === 'control' && blinkinPort.port === port;
+                    return (
+                      <div key={port} className={`p-2 rounded text-center text-xs ${isBlinkin ? 'bg-yellow-600' : servo ? 'bg-purple-600' : 'bg-gray-600'}`}>
+                        <div className="font-bold">{port}</div>
+                        <div className="truncate">{isBlinkin ? 'blinkin' : servo?.name || '-'}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Encoder Ports for Odometry */}
+              <div>
+                <h5 className="text-sm font-semibold text-gray-300 mb-2">Encoder Ports (Odometry)</h5>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Pod 1 ({odo1Measures === 'forward_back' ? 'F/B' : 'L/R'})</label>
+                    <select
+                      value={odo1Port.port}
+                      onChange={(e) => setOdo1Port({...odo1Port, port: parseInt(e.target.value)})}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {[0,1,2,3].map(p => <option key={p} value={p}>Port {p}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Pod 2 ({odo2Measures === 'forward_back' ? 'F/B' : 'L/R'})</label>
+                    <select
+                      value={odo2Port.port}
+                      onChange={(e) => setOdo2Port({...odo2Port, port: parseInt(e.target.value)})}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {[0,1,2,3].map(p => <option key={p} value={p}>Port {p}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  Note: Encoder ports share with motor ports. The odometry pods plug into the encoder pins of the motor ports.
+                </p>
+              </div>
+            </div>
+
+            {/* Expansion Hub */}
+            {hasExpansionHub && (
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <h4 className="text-lg font-semibold text-purple-400 mb-3">Expansion Hub</h4>
+                
+                {/* Motor Ports */}
+                <div className="mb-4">
+                  <h5 className="text-sm font-semibold text-gray-300 mb-2">Motor Ports (0-3)</h5>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[0,1,2,3].map(port => {
+                      const driveMotor = motors.find(m => m.hub === 'expansion' && m.port === port);
+                      const auxMotor = auxMotors.find(m => m.hub === 'expansion' && m.port === port);
+                      const motor = driveMotor || auxMotor;
+                      const isDrive = !!driveMotor;
+                      return (
+                        <div key={port} className={`p-2 rounded text-center text-xs ${motor ? (isDrive ? 'bg-blue-600' : 'bg-orange-600') : 'bg-gray-600'}`}>
+                          <div className="font-bold">{port}</div>
+                          <div className="truncate">{motor?.name || '-'}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                
+                {/* Servo Ports */}
+                <div>
+                  <h5 className="text-sm font-semibold text-gray-300 mb-2">Servo Ports (0-5)</h5>
+                  <div className="grid grid-cols-6 gap-2">
+                    {[0,1,2,3,4,5].map(port => {
+                      const servo = servos.find(s => s.hub === 'expansion' && s.port === port);
+                      const isBlinkin = hasBlinkin && blinkinPort.hub === 'expansion' && blinkinPort.port === port;
+                      return (
+                        <div key={port} className={`p-2 rounded text-center text-xs ${isBlinkin ? 'bg-yellow-600' : servo ? 'bg-purple-600' : 'bg-gray-600'}`}>
+                          <div className="font-bold">{port}</div>
+                          <div className="truncate">{isBlinkin ? 'blinkin' : servo?.name || '-'}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Port Conflicts Warning */}
+            {(() => {
+              const conflicts = [];
+              // Combine all motors for conflict checking
+              const allMotorsForConflict = [...motors, ...auxMotors];
+              // Check motor port conflicts
+              allMotorsForConflict.forEach((m1, i) => {
+                allMotorsForConflict.forEach((m2, j) => {
+                  if (i < j && m1.hub === m2.hub && m1.port === m2.port) {
+                    conflicts.push(`Motors "${m1.name}" and "${m2.name}" both on ${m1.hub} port ${m1.port}`);
+                  }
+                });
+              });
+              // Check servo port conflicts
+              servos.forEach((s1, i) => {
+                servos.forEach((s2, j) => {
+                  if (i < j && s1.hub === s2.hub && s1.port === s2.port) {
+                    conflicts.push(`Servos "${s1.name}" and "${s2.name}" both on ${s1.hub} port ${s1.port}`);
+                  }
+                });
+              });
+              // Check Blinkin conflicts with servos
+              if (hasBlinkin) {
+                const conflictingServo = servos.find(s => s.hub === blinkinPort.hub && s.port === blinkinPort.port);
+                if (conflictingServo) {
+                  conflicts.push(`Blinkin and servo "${conflictingServo.name}" both on ${blinkinPort.hub} port ${blinkinPort.port}`);
+                }
+              }
+              
+              if (conflicts.length > 0) {
+                return (
+                  <div className="bg-red-900 border border-red-600 p-3 rounded-lg">
+                    <h5 className="text-red-400 font-semibold mb-2">⚠️ Port Conflicts Detected</h5>
+                    <ul className="text-red-300 text-sm space-y-1">
+                      {conflicts.map((c, i) => <li key={i}>{c}</li>)}
+                    </ul>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+          </div>
+        );
+
+      case 'output':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Generated Code</h3>
+            <div className="relative">
+              <pre className="bg-gray-900 p-4 rounded-lg text-sm text-gray-300 overflow-x-auto max-h-96 overflow-y-auto font-mono">
+                {generateCodeSnippet()}
+              </pre>
+              <button
+                onClick={() => navigator.clipboard.writeText(generateCodeSnippet())}
+                className="absolute top-2 right-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        );
+
+      case 'sensors':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Sensors</h3>
+              <button
+                onClick={() => {
+                  const newId = sensors.length > 0 ? Math.max(...sensors.map(s => s.id)) + 1 : 1;
+                  setSensors([...sensors, {
+                    id: newId,
+                    name: `sensor${newId}`,
+                    type: 'rev_2m_distance',
+                    hub: 'control',
+                    interface: 'i2c',
+                    port: 0
+                  }]);
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+              >
+                + Add Sensor
+              </button>
+            </div>
+
+            {sensors.length === 0 ? (
+              <div className="text-gray-400 text-center py-8">
+                No sensors configured. Click "+ Add Sensor" to add one.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {sensors.map((sensor, index) => (
+                  <div key={sensor.id} className="bg-gray-700 p-3 rounded-lg">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-yellow-400 font-semibold">Sensor {index + 1}</span>
+                      <button
+                        onClick={() => setSensors(sensors.filter(s => s.id !== sensor.id))}
+                        className="text-red-400 hover:text-red-300 text-sm"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Name</label>
+                        <input
+                          type="text"
+                          value={sensor.name}
+                          onChange={(e) => {
+                            const updated = sensors.map(s =>
+                              s.id === sensor.id ? {...s, name: e.target.value} : s
+                            );
+                            setSensors(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Hub / Port</label>
+                        <div className="flex gap-1">
+                          <select
+                            value={sensor.hub}
+                            onChange={(e) => {
+                              const updated = sensors.map(s =>
+                                s.id === sensor.id ? {...s, hub: e.target.value} : s
+                              );
+                              setSensors(updated);
+                            }}
+                            className="flex-1 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            <option value="control">Control</option>
+                            {hasExpansionHub && <option value="expansion">Expansion</option>}
+                          </select>
+                          <select
+                            value={sensor.port}
+                            onChange={(e) => {
+                              const updated = sensors.map(s =>
+                                s.id === sensor.id ? {...s, port: parseInt(e.target.value)} : s
+                              );
+                              setSensors(updated);
+                            }}
+                            className="w-16 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            {[0,1,2,3].map(p => <option key={p} value={p}>{p}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-gray-400 mb-1">Sensor Type</label>
+                        <select
+                          value={sensor.type}
+                          onChange={(e) => {
+                            const sensorInfo = sensorDatabase[e.target.value];
+                            const updated = sensors.map(s =>
+                              s.id === sensor.id ? {...s, type: e.target.value, interface: sensorInfo?.interface || 'i2c'} : s
+                            );
+                            setSensors(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <optgroup label="REV Robotics">
+                            {Object.entries(sensorDatabase).filter(([k,v]) => v.brand === 'REV').map(([key, s]) => (
+                              <option key={key} value={key}>{s.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="Other">
+                            {Object.entries(sensorDatabase).filter(([k,v]) => v.brand !== 'REV').map(([key, s]) => (
+                              <option key={key} value={key}>{s.name}</option>
+                            ))}
+                          </optgroup>
+                        </select>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-400">
+                      Interface: {sensorDatabase[sensor.type]?.interface?.toUpperCase()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
+      case 'blinkin':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">Blinkin LED Controller</h3>
+            
+            <div className="bg-gray-700 p-3 rounded-lg">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasBlinkin}
+                  onChange={(e) => setHasBlinkin(e.target.checked)}
+                  className="form-checkbox h-5 w-5 text-green-500 rounded"
+                />
+                <span className="text-gray-300">Using Blinkin LED Controller</span>
+              </label>
+            </div>
+
+            {hasBlinkin && (
+              <>
+                <div className="bg-gray-700 p-4 rounded-lg">
+                  <h4 className="text-lg font-semibold text-blue-400 mb-3">Blinkin Port</h4>
+                  <div className="flex gap-2">
+                    <select
+                      value={blinkinPort.hub}
+                      onChange={(e) => setBlinkinPort({...blinkinPort, hub: e.target.value})}
+                      className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      <option value="control">Control Hub</option>
+                      {hasExpansionHub && <option value="expansion">Expansion Hub</option>}
+                    </select>
+                    <select
+                      value={blinkinPort.port}
+                      onChange={(e) => setBlinkinPort({...blinkinPort, port: parseInt(e.target.value)})}
+                      className="w-24 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      {[0,1,2,3,4,5].map(p => <option key={p} value={p}>Port {p}</option>)}
+                    </select>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2">Blinkin connects to a servo port</p>
+                </div>
+
+                <div className="bg-gray-700 p-4 rounded-lg">
+                  <div className="flex justify-between items-center mb-3">
+                    <h4 className="text-lg font-semibold text-blue-400">LED Patterns</h4>
+                    <button
+                      onClick={() => {
+                        const newId = blinkinPatterns.length > 0 ? Math.max(...blinkinPatterns.map(p => p.id)) + 1 : 1;
+                        setBlinkinPatterns([...blinkinPatterns, {
+                          id: newId,
+                          name: `pattern${newId}`,
+                          pattern: 'solid_green',
+                          description: ''
+                        }]);
+                      }}
+                      className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+                    >
+                      + Add Pattern
+                    </button>
+                  </div>
+
+                  <div className="text-xs text-gray-400 mb-3">
+                    Formula: FTC_Value = (Pulse_Width - 600) / 1800
+                  </div>
+
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {blinkinPatterns.map((pattern, index) => (
+                      <div key={pattern.id} className="flex gap-2 items-center bg-gray-600 p-2 rounded">
+                        <input
+                          type="text"
+                          value={pattern.name}
+                          onChange={(e) => {
+                            const updated = blinkinPatterns.map(p =>
+                              p.id === pattern.id ? {...p, name: e.target.value} : p
+                            );
+                            setBlinkinPatterns(updated);
+                          }}
+                          className="w-24 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          placeholder="Name"
+                        />
+                        <select
+                          value={pattern.pattern}
+                          onChange={(e) => {
+                            const updated = blinkinPatterns.map(p =>
+                              p.id === pattern.id ? {...p, pattern: e.target.value} : p
+                            );
+                            setBlinkinPatterns(updated);
+                          }}
+                          className="flex-1 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <optgroup label="Solid Colors">
+                            {Object.entries(blinkinDatabase).filter(([k]) => k.startsWith('solid')).map(([key, p]) => (
+                              <option key={key} value={key}>{p.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="Rainbow">
+                            {Object.entries(blinkinDatabase).filter(([k]) => k.startsWith('rainbow')).map(([key, p]) => (
+                              <option key={key} value={key}>{p.name}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="Effects">
+                            {Object.entries(blinkinDatabase).filter(([k]) => !k.startsWith('solid') && !k.startsWith('rainbow')).map(([key, p]) => (
+                              <option key={key} value={key}>{p.name}</option>
+                            ))}
+                          </optgroup>
+                        </select>
+                        <span className="text-xs text-green-400 font-mono w-16">
+                          {blinkinDatabase[pattern.pattern]?.ftcValue.toFixed(3)}
+                        </span>
+                        <button
+                          onClick={() => setBlinkinPatterns(blinkinPatterns.filter(p => p.id !== pattern.id))}
+                          className="text-red-400 hover:text-red-300"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        );
+
+      case 'apriltags':
+        return (
+          <div className="space-y-6">
+            <h3 className="text-xl font-bold text-green-400">AprilTag Configuration</h3>
+            
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-3">Tag Size</h4>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={aprilTagSize}
+                  onChange={(e) => setAprilTagSize(parseFloat(e.target.value) || 0)}
+                  className="w-24 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                />
+                <span className="text-gray-300">mm</span>
+                <span className="text-gray-400 text-sm">({(aprilTagSize / 25.4).toFixed(2)} inches)</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">Configure this in Limelight web interface</p>
+            </div>
+
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <div className="flex justify-between items-center mb-3">
+                <h4 className="text-lg font-semibold text-blue-400">Target Tags</h4>
+                <button
+                  onClick={() => {
+                    const newId = targetTags.length > 0 ? Math.max(...targetTags.map(t => t.id)) + 1 : 1;
+                    setTargetTags([...targetTags, {
+                      id: newId,
+                      tagId: 1,
+                      name: `Tag ${newId}`
+                    }]);
+                  }}
+                  className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+                >
+                  + Add Tag
+                </button>
+              </div>
+
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {targetTags.map((tag) => (
+                  <div key={tag.id} className="flex gap-2 items-center bg-gray-600 p-2 rounded">
+                    <div className="flex items-center gap-1">
+                      <span className="text-gray-400 text-sm">ID:</span>
+                      <input
+                        type="number"
+                        value={tag.tagId}
+                        onChange={(e) => {
+                          const updated = targetTags.map(t =>
+                            t.id === tag.id ? {...t, tagId: parseInt(e.target.value) || 0} : t
+                          );
+                          setTargetTags(updated);
+                        }}
+                        className="w-16 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      value={tag.name}
+                      onChange={(e) => {
+                        const updated = targetTags.map(t =>
+                          t.id === tag.id ? {...t, name: e.target.value} : t
+                        );
+                        setTargetTags(updated);
+                      }}
+                      className="flex-1 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      placeholder="Description"
+                    />
+                    <button
+                      onClick={() => setTargetTags(targetTags.filter(t => t.id !== tag.id))}
+                      className="text-red-400 hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'driverstation':
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Driver Station Configuration</h3>
+              <button
+                onClick={printDSConfig}
+                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded text-sm"
+              >
+                🖨️ Print
+              </button>
+            </div>
+            <p className="text-gray-400 text-sm">Follow these steps to configure your robot in the Driver Station app.</p>
+            
+            <div className="relative">
+              <pre className="bg-gray-900 p-4 rounded-lg text-sm text-gray-300 overflow-x-auto max-h-96 overflow-y-auto font-mono whitespace-pre-wrap">
+                {generateDriverStationConfig()}
+              </pre>
+              <button
+                onClick={() => navigator.clipboard.writeText(generateDriverStationConfig())}
+                className="absolute top-2 right-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  // Visual Robot Diagram
+  const RobotDiagram = () => {
+    const scale = 10; // pixels per inch
+    const width = robotWidth * scale;
+    const height = robotLength * scale;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    // Convert positions to diagram coordinates (from top-left)
+    const odo1X = (robotWidth - odo1FromRight) * scale;
+    const odo1Y = (robotLength - odo1FromBack) * scale;
+    const odo2X = (robotWidth - odo2FromRight) * scale;
+    const odo2Y = (robotLength - odo2FromBack) * scale;
+    const llX = (robotWidth - limelightFromRight) * scale;
+    const llY = (robotLength - limelightFromBack) * scale;
+
+    return (
+      <div className="bg-gray-800 p-4 rounded-lg">
+        <h3 className="text-lg font-bold text-green-400 mb-3 text-center">Robot Top-Down View</h3>
+        <div className="flex justify-center">
+          <svg
+            width={width + 60}
+            height={height + 60}
+            className="bg-gray-900 rounded"
+          >
+            {/* Offset for padding */}
+            <g transform="translate(30, 30)">
+              {/* Robot body */}
+              <rect
+                x={0}
+                y={0}
+                width={width}
+                height={height}
+                fill="#374151"
+                stroke="#10B981"
+                strokeWidth="2"
+                rx="4"
+              />
+
+              {/* Center crosshair */}
+              <line x1={centerX - 10} y1={centerY} x2={centerX + 10} y2={centerY} stroke="#6B7280" strokeWidth="1" />
+              <line x1={centerX} y1={centerY - 10} x2={centerX} y2={centerY + 10} stroke="#6B7280" strokeWidth="1" />
+              <circle cx={centerX} cy={centerY} r="3" fill="#6B7280" />
+
+              {/* Direction arrow (front) */}
+              <polygon
+                points={`${centerX},5 ${centerX - 8},20 ${centerX + 8},20`}
+                fill="#10B981"
+              />
+              <text x={centerX} y={-5} textAnchor="middle" fill="#10B981" fontSize="12">FRONT</text>
+
+              {/* Odometry Pod 1 - orientation based on selection */}
+              {odo1Measures === 'forward_back' ? (
+                <line
+                  x1={odo1X}
+                  y1={odo1Y - 12}
+                  x2={odo1X}
+                  y2={odo1Y + 12}
+                  stroke="#3B82F6"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                />
+              ) : (
+                <line
+                  x1={odo1X - 12}
+                  y1={odo1Y}
+                  x2={odo1X + 12}
+                  y2={odo1Y}
+                  stroke="#3B82F6"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                />
+              )}
+              <text x={odo1X + 8} y={odo1Y + 4} fill="#3B82F6" fontSize="10">P1</text>
+
+              {/* Odometry Pod 2 - orientation based on selection */}
+              {odo2Measures === 'left_right' ? (
+                <line
+                  x1={odo2X - 12}
+                  y1={odo2Y}
+                  x2={odo2X + 12}
+                  y2={odo2Y}
+                  stroke="#8B5CF6"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                />
+              ) : (
+                <line
+                  x1={odo2X}
+                  y1={odo2Y - 12}
+                  x2={odo2X}
+                  y2={odo2Y + 12}
+                  stroke="#8B5CF6"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                />
+              )}
+              <text x={odo2X + 8} y={odo2Y - 8} fill="#8B5CF6" fontSize="10">P2</text>
+
+              {/* Limelight */}
+              <rect
+                x={llX - 8}
+                y={llY - 5}
+                width={16}
+                height={10}
+                fill="#EF4444"
+                rx="2"
+              />
+              <text x={llX} y={llY + 18} textAnchor="middle" fill="#EF4444" fontSize="10">LL</text>
+
+              {/* Wheels */}
+              {wheelType === 'mecanum' ? (
+                <>
+                  {/* Mecanum wheels with direction indicators */}
+                  <rect x={-5} y={10} width={12} height={25} fill="#4B5563" rx="2" />
+                  <line x1={-2} y1={15} x2={4} y2={30} stroke="#9CA3AF" strokeWidth="2" />
+                  
+                  <rect x={width - 7} y={10} width={12} height={25} fill="#4B5563" rx="2" />
+                  <line x1={width - 4} y1={30} x2={width + 2} y2={15} stroke="#9CA3AF" strokeWidth="2" />
+                  
+                  <rect x={-5} y={height - 35} width={12} height={25} fill="#4B5563" rx="2" />
+                  <line x1={-2} y1={height - 30} x2={4} y2={height - 15} stroke="#9CA3AF" strokeWidth="2" />
+                  
+                  <rect x={width - 7} y={height - 35} width={12} height={25} fill="#4B5563" rx="2" />
+                  <line x1={width - 4} y1={height - 15} x2={width + 2} y2={height - 30} stroke="#9CA3AF" strokeWidth="2" />
+                </>
+              ) : (
+                <>
+                  {/* Regular wheels */}
+                  <rect x={-5} y={10} width={12} height={25} fill="#4B5563" rx="2" />
+                  <rect x={width - 7} y={10} width={12} height={25} fill="#4B5563" rx="2" />
+                  <rect x={-5} y={height - 35} width={12} height={25} fill="#4B5563" rx="2" />
+                  <rect x={width - 7} y={height - 35} width={12} height={25} fill="#4B5563" rx="2" />
+                </>
+              )}
+
+              {/* Labels */}
+              <text x={-15} y={height / 2} textAnchor="middle" fill="#9CA3AF" fontSize="10" transform={`rotate(-90, -15, ${height / 2})`}>
+                {robotLength}"
+              </text>
+              <text x={width / 2} y={height + 15} textAnchor="middle" fill="#9CA3AF" fontSize="10">
+                {robotWidth}"
+              </text>
+            </g>
+          </svg>
+        </div>
+
+        {/* Legend */}
+        <div className="mt-4 flex justify-center gap-6 text-sm">
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-1 bg-blue-500 rounded"></div>
+            <span className="text-gray-400">Pod 1 ({odo1Measures === 'forward_back' ? 'F/B' : 'L/R'})</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-1 bg-purple-500 rounded"></div>
+            <span className="text-gray-400">Pod 2 ({odo2Measures === 'forward_back' ? 'F/B' : 'L/R'})</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 bg-red-500 rounded"></div>
+            <span className="text-gray-400">Limelight</span>
+          </div>
+        </div>
+
+        {/* Offset Summary */}
+        <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+          <div className="bg-gray-700 p-2 rounded text-center">
+            <div className="text-blue-400 font-semibold">Pod 1 ({odo1Measures === 'forward_back' ? 'F/B' : 'L/R'})</div>
+            <div className="text-gray-300">X: {offsets.odo1.x.toFixed(2)}"</div>
+            <div className="text-gray-300">Y: {offsets.odo1.y.toFixed(2)}"</div>
+          </div>
+          <div className="bg-gray-700 p-2 rounded text-center">
+            <div className="text-purple-400 font-semibold">Pod 2 ({odo2Measures === 'forward_back' ? 'F/B' : 'L/R'})</div>
+            <div className="text-gray-300">X: {offsets.odo2.x.toFixed(2)}"</div>
+            <div className="text-gray-300">Y: {offsets.odo2.y.toFixed(2)}"</div>
+          </div>
+          <div className="bg-gray-700 p-2 rounded text-center">
+            <div className="text-red-400 font-semibold">Limelight</div>
+            <div className="text-gray-300">X: {offsets.limelight.x.toFixed(2)}"</div>
+            <div className="text-gray-300">Y: {offsets.limelight.y.toFixed(2)}"</div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-4">
+      {/* Header */}
+      <div className="max-w-6xl mx-auto mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-green-400">FTC Robot Configurator</h1>
+            <div className="flex items-center gap-2 mt-1">
+              <input
+                type="text"
+                value={robotName}
+                onChange={(e) => setRobotName(e.target.value)}
+                className="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                placeholder="Robot Name"
+              />
+              <span className="text-gray-400 text-sm">|</span>
+              <span className="text-gray-400 text-sm">{motors.length} drive + {auxMotors.length} motors, {servos.length} servos</span>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowSaveModal(true)}
+              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-medium"
+            >
+              💾 Save
+            </button>
+            <button
+              onClick={() => setShowLoadModal(true)}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-medium"
+            >
+              📂 Load
+            </button>
+            <button
+              onClick={exportConfig}
+              className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded text-sm font-medium"
+            >
+              ⬇️ Export
+            </button>
+            <label className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded text-sm font-medium cursor-pointer">
+              ⬆️ Import
+              <input type="file" accept=".json" onChange={importConfig} className="hidden" />
+            </label>
+          </div>
+        </div>
+
+        {/* Validation Warnings */}
+        {validationWarnings.length > 0 && (
+          <div className="mt-4 bg-gray-800 border border-yellow-600 rounded-lg p-3">
+            <h4 className="text-yellow-400 font-semibold mb-2">⚠️ Configuration Issues ({validationWarnings.length})</h4>
+            <div className="space-y-1 max-h-24 overflow-y-auto">
+              {validationWarnings.map((w, i) => (
+                <div key={i} className={`text-sm ${w.type === 'error' ? 'text-red-400' : 'text-yellow-300'}`}>
+                  {w.type === 'error' ? '❌' : '⚠️'} {w.message}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Save Modal */}
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-green-400 mb-4">Save Configuration</h3>
+            <div className="mb-4">
+              <label className="block text-sm text-gray-300 mb-1">Robot Name</label>
+              <input
+                type="text"
+                value={robotName}
+                onChange={(e) => setRobotName(e.target.value)}
+                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
+              />
+            </div>
+            {savedConfigs.find(c => c.name === robotName) && (
+              <p className="text-yellow-400 text-sm mb-4">⚠️ This will overwrite the existing "{robotName}" configuration</p>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowSaveModal(false)}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveConfig}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Load Modal */}
+      {showLoadModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-xl font-bold text-blue-400 mb-4">Load Configuration</h3>
+            {savedConfigs.length === 0 ? (
+              <p className="text-gray-400">No saved configurations found.</p>
+            ) : (
+              <div className="space-y-2 max-h-64 overflow-y-auto mb-4">
+                {savedConfigs.map((config, i) => (
+                  <div key={i} className="flex items-center justify-between bg-gray-700 rounded p-3">
+                    <div>
+                      <div className="text-white font-medium">{config.name}</div>
+                      <div className="text-gray-400 text-xs">
+                        {new Date(config.savedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => loadConfig(config)}
+                        className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                      >
+                        Load
+                      </button>
+                      <button
+                        onClick={() => deleteConfig(config.name)}
+                        className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowLoadModal(false)}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Left Column - Configuration */}
+        <div>
+          {/* Tabs */}
+          <div className="flex flex-wrap gap-1 mb-4 bg-gray-800 p-1 rounded-lg">
+            {[
+              { id: 'dimensions', label: 'Robot' },
+              { id: 'wheels', label: 'Wheels' },
+              { id: 'drive', label: 'Drive' },
+              { id: 'motors', label: 'Motors' },
+              { id: 'servos', label: 'Servos' },
+              { id: 'sensors', label: 'Sensors' },
+              { id: 'odometry', label: 'Odometry' },
+              { id: 'imu', label: 'IMU' },
+              { id: 'limelight', label: 'Limelight' },
+              { id: 'apriltags', label: 'Tags' },
+              { id: 'blinkin', label: 'LEDs' },
+              { id: 'ports', label: 'Ports' },
+              { id: 'output', label: 'Code' },
+              { id: 'driverstation', label: 'DS' }
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-2 py-1 rounded-md text-xs font-medium transition-colors ${
+                  activeTab === tab.id
+                    ? 'bg-green-600 text-white'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-700'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab Content */}
+          <div className="bg-gray-800 p-6 rounded-lg">
+            {renderTabContent()}
+          </div>
+        </div>
+
+        {/* Right Column - Visual */}
+        <div>
+          <RobotDiagram />
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="text-center mt-6 text-gray-500 text-sm">
+        <p>FTC Robot Configurator v3.0 | Save/Load • Validation • Print</p>
+      </div>
+    </div>
+  );
+};
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<FTCRobotConfigurator />);
+  </script>
+</body>
+</html>
