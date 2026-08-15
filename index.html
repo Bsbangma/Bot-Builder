@@ -2549,12 +2549,27 @@ Make sure your code initializes the IMU with these orientations!
         ];
 
         const actionTypes = [
-          { value: 'drive_to_tag', label: '🎯 Drive to AprilTag', icon: '🎯' },
-          { value: 'motor_position', label: '⚙️ Move Motor to Position', icon: '⚙️' },
-          { value: 'motor_time', label: '🔄 Run Motor for Time', icon: '🔄' },
-          { value: 'servo_position', label: '🦾 Set Servo Position', icon: '🦾' },
-          { value: 'wait', label: '⏱️ Wait', icon: '⏱️' },
-          { value: 'led_pattern', label: '💡 Set LED Pattern', icon: '💡' }
+          // Driving
+          { value: 'drive_distance', label: '🚗 Drive Distance', icon: '🚗', category: 'drive' },
+          { value: 'turn_to_heading', label: '🔄 Turn to Heading', icon: '🔄', category: 'drive' },
+          { value: 'drive_time', label: '⏱️ Drive for Time', icon: '⏱️', category: 'drive' },
+          { value: 'drive_to_tag', label: '🎯 Drive to AprilTag', icon: '🎯', category: 'drive' },
+          // Motors
+          { value: 'motor_position', label: '⚙️ Motor to Position', icon: '⚙️', category: 'motor' },
+          { value: 'motor_time', label: '🔄 Run Motor for Time', icon: '🔄', category: 'motor' },
+          { value: 'motor_until_velocity', label: '🏎️ Motor Until Velocity', icon: '🏎️', category: 'motor' },
+          { value: 'wait_velocity', label: '⏸️ Wait for Velocity', icon: '⏸️', category: 'motor' },
+          // Other
+          { value: 'servo_position', label: '🦾 Set Servo Position', icon: '🦾', category: 'other' },
+          { value: 'wait', label: '⏱️ Wait', icon: '⏱️', category: 'other' },
+          { value: 'led_pattern', label: '💡 Set LED Pattern', icon: '💡', category: 'other' }
+        ];
+
+        const driveDirections = [
+          { value: 'forward', label: 'Forward' },
+          { value: 'backward', label: 'Backward' },
+          { value: 'left', label: 'Strafe Left' },
+          { value: 'right', label: 'Strafe Right' }
         ];
 
         const createNewMacro = () => {
@@ -2591,6 +2606,11 @@ Make sure your code initializes the IMU with these orientations!
             type: 'wait',
             // Common fields
             duration: 0.5,
+            // Drive fields
+            driveDirection: 'forward',
+            driveDistance: 12,
+            drivePower: 0.5,
+            targetHeading: 0,
             // Drive to tag fields
             tagId: 21,
             distance: 24,
@@ -2601,6 +2621,10 @@ Make sure your code initializes the IMU with these orientations!
             motorPosition: 0,
             motorPower: 0.8,
             motorDuration: 1.0,
+            // Velocity fields
+            targetVelocity: 1000,
+            velocityCondition: 'above', // 'above' or 'below'
+            velocityTimeout: 3.0,
             // Servo fields
             servoName: servos.length > 0 ? servos[0].name : '',
             servoPosition: 0.5,
@@ -2643,6 +2667,107 @@ Make sure your code initializes the IMU with these orientations!
 
         const renderStepConfig = (macro, step) => {
           switch (step.type) {
+            case 'drive_distance':
+              return (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Direction</label>
+                    <select
+                      value={step.driveDirection}
+                      onChange={(e) => updateStep(macro.id, step.id, 'driveDirection', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {driveDirections.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Distance (in)</label>
+                    <input
+                      type="number"
+                      value={step.driveDistance}
+                      onChange={(e) => updateStep(macro.id, step.id, 'driveDistance', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power (0-1)</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1.0"
+                      step="0.1"
+                      value={step.drivePower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'drivePower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'turn_to_heading':
+              return (
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Target Heading (°)</label>
+                    <input
+                      type="number"
+                      min="-180"
+                      max="180"
+                      value={step.targetHeading}
+                      onChange={(e) => updateStep(macro.id, step.id, 'targetHeading', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power (0-1)</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1.0"
+                      step="0.1"
+                      value={step.drivePower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'drivePower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'drive_time':
+              return (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Direction</label>
+                    <select
+                      value={step.driveDirection}
+                      onChange={(e) => updateStep(macro.id, step.id, 'driveDirection', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {driveDirections.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Duration (sec)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={step.duration}
+                      onChange={(e) => updateStep(macro.id, step.id, 'duration', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power (0-1)</label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      max="1.0"
+                      step="0.1"
+                      value={step.drivePower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'drivePower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
             case 'drive_to_tag':
               return (
                 <div className="grid grid-cols-4 gap-2 mt-2">
@@ -2753,6 +2878,97 @@ Make sure your code initializes the IMU with these orientations!
                       step="0.1"
                       value={step.motorPower}
                       onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'motor_until_velocity':
+              return (
+                <div className="grid grid-cols-4 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Target (ticks/sec)</label>
+                    <input
+                      type="number"
+                      value={step.targetVelocity}
+                      onChange={(e) => updateStep(macro.id, step.id, 'targetVelocity', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power</label>
+                    <input
+                      type="number"
+                      min="-1.0"
+                      max="1.0"
+                      step="0.1"
+                      value={step.motorPower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Timeout (sec)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={step.velocityTimeout}
+                      onChange={(e) => updateStep(macro.id, step.id, 'velocityTimeout', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                </div>
+              );
+            case 'wait_velocity':
+              return (
+                <div className="grid grid-cols-4 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Condition</label>
+                    <select
+                      value={step.velocityCondition}
+                      onChange={(e) => updateStep(macro.id, step.id, 'velocityCondition', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      <option value="above">≥ Above</option>
+                      <option value="below">≤ Below</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Velocity (ticks/sec)</label>
+                    <input
+                      type="number"
+                      value={step.targetVelocity}
+                      onChange={(e) => updateStep(macro.id, step.id, 'targetVelocity', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Timeout (sec)</label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      value={step.velocityTimeout}
+                      onChange={(e) => updateStep(macro.id, step.id, 'velocityTimeout', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
                   </div>
@@ -2902,7 +3118,8 @@ Make sure your code initializes the IMU with these orientations!
                       >
                         <option value="button">Button</option>
                         <option value="combo">Button Combo</option>
-                        <option value="sensor">Sensor Condition</option>
+                        <option value="velocity_above">Motor Velocity ≥</option>
+                        <option value="velocity_below">Motor Velocity ≤</option>
                         <option value="tag_visible">AprilTag Visible</option>
                       </select>
                     </div>
@@ -2943,6 +3160,29 @@ Make sure your code initializes the IMU with these orientations!
                         </div>
                       </>
                     )}
+                    {(editingMacro.triggerType === 'velocity_above' || editingMacro.triggerType === 'velocity_below') && (
+                      <>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Motor</label>
+                          <select
+                            value={editingMacro.triggerMotor || (auxMotors.length > 0 ? auxMotors[0].name : '')}
+                            onChange={(e) => updateMacro(editingMacro.id, 'triggerMotor', e.target.value)}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          >
+                            {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">Velocity (ticks/sec)</label>
+                          <input
+                            type="number"
+                            value={editingMacro.triggerVelocity || 1000}
+                            onChange={(e) => updateMacro(editingMacro.id, 'triggerVelocity', parseFloat(e.target.value))}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                          />
+                        </div>
+                      </>
+                    )}
                     {editingMacro.triggerType === 'tag_visible' && (
                       <div>
                         <label className="block text-xs text-gray-400 mb-1">Tag ID</label>
@@ -2954,6 +3194,7 @@ Make sure your code initializes the IMU with these orientations!
                         />
                       </div>
                     )}
+                    {(editingMacro.triggerType === 'button' || editingMacro.triggerType === 'combo') && (
                     <div>
                       <label className="block text-xs text-gray-400 mb-1">Controller</label>
                       <select
@@ -2965,6 +3206,8 @@ Make sure your code initializes the IMU with these orientations!
                         <option value="gamepad2">Gamepad 2</option>
                       </select>
                     </div>
+                    )}
+                    {(editingMacro.triggerType === 'button' || editingMacro.triggerType === 'combo') && (
                     <div>
                       <label className="block text-xs text-gray-400 mb-1">Behavior</label>
                       <select
@@ -2976,6 +3219,7 @@ Make sure your code initializes the IMU with these orientations!
                         <option value="hold">Hold (release to stop)</option>
                       </select>
                     </div>
+                    )}
                   </div>
                 </div>
 
