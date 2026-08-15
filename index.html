@@ -19,45 +19,45 @@
 
 const FTCRobotConfigurator = () => {
   // Robot Dimensions
-  const [robotLength, setRobotLength] = useState(18);
-  const [robotWidth, setRobotWidth] = useState(18);
+  const [robotLength, setRobotLength] = React.useState(18);
+  const [robotWidth, setRobotWidth] = React.useState(18);
 
   // Drive Wheels
-  const [wheelBrand, setWheelBrand] = useState('gobilda');
-  const [wheelType, setWheelType] = useState('mecanum');
-  const [wheelSize, setWheelSize] = useState(104);
+  const [wheelBrand, setWheelBrand] = React.useState('gobilda');
+  const [wheelType, setWheelType] = React.useState('mecanum');
+  const [wheelSize, setWheelSize] = React.useState(104);
 
   // Odometry Pod 1
-  const [odo1Type, setOdo1Type] = useState('gobilda_4bar');
-  const [odo1FromBack, setOdo1FromBack] = useState(9);
-  const [odo1FromRight, setOdo1FromRight] = useState(9);
-  const [odo1Reversed, setOdo1Reversed] = useState(false);
-  const [odo1Measures, setOdo1Measures] = useState('forward_back');
+  const [odo1Type, setOdo1Type] = React.useState('gobilda_4bar');
+  const [odo1FromBack, setOdo1FromBack] = React.useState(9);
+  const [odo1FromRight, setOdo1FromRight] = React.useState(9);
+  const [odo1Reversed, setOdo1Reversed] = React.useState(false);
+  const [odo1Measures, setOdo1Measures] = React.useState('forward_back');
 
   // Odometry Pod 2
-  const [odo2Type, setOdo2Type] = useState('gobilda_4bar');
-  const [odo2FromBack, setOdo2FromBack] = useState(9);
-  const [odo2FromRight, setOdo2FromRight] = useState(9);
-  const [odo2Reversed, setOdo2Reversed] = useState(false);
-  const [odo2Measures, setOdo2Measures] = useState('left_right');
+  const [odo2Type, setOdo2Type] = React.useState('gobilda_4bar');
+  const [odo2FromBack, setOdo2FromBack] = React.useState(9);
+  const [odo2FromRight, setOdo2FromRight] = React.useState(9);
+  const [odo2Reversed, setOdo2Reversed] = React.useState(false);
+  const [odo2Measures, setOdo2Measures] = React.useState('left_right');
 
   // IMU Configuration
-  const [imuLocation, setImuLocation] = useState('control_hub');
-  const [imuLogoDirection, setImuLogoDirection] = useState('UP');
-  const [imuUsbDirection, setImuUsbDirection] = useState('FORWARD');
+  const [imuLocation, setImuLocation] = React.useState('control_hub');
+  const [imuLogoDirection, setImuLogoDirection] = React.useState('UP');
+  const [imuUsbDirection, setImuUsbDirection] = React.useState('FORWARD');
 
   // Limelight Configuration
-  const [limelightVersion, setLimelightVersion] = useState('3a');
-  const [limelightFromBack, setLimelightFromBack] = useState(9);
-  const [limelightFromRight, setLimelightFromRight] = useState(9);
-  const [limelightHeight, setLimelightHeight] = useState(8);
-  const [limelightFacing, setLimelightFacing] = useState('FORWARD');
+  const [limelightVersion, setLimelightVersion] = React.useState('3a');
+  const [limelightFromBack, setLimelightFromBack] = React.useState(9);
+  const [limelightFromRight, setLimelightFromRight] = React.useState(9);
+  const [limelightHeight, setLimelightHeight] = React.useState(8);
+  const [limelightFacing, setLimelightFacing] = React.useState('FORWARD');
 
   // Active Tab
-  const [activeTab, setActiveTab] = useState('dimensions');
+  const [activeTab, setActiveTab] = React.useState('dimensions');
 
   // Drive Motors Configuration
-  const [motors, setMotors] = useState([
+  const [motors, setMotors] = React.useState([
     { id: 1, name: 'frontLeft', type: 'gobilda_5203_26_9', hub: 'control', port: 1, reversed: true },
     { id: 2, name: 'frontRight', type: 'gobilda_5203_26_9', hub: 'control', port: 0, reversed: false },
     { id: 3, name: 'backLeft', type: 'gobilda_5203_26_9', hub: 'control', port: 3, reversed: true },
@@ -65,40 +65,40 @@ const FTCRobotConfigurator = () => {
   ]);
 
   // Auxiliary Motors Configuration (arm, intake, etc.)
-  const [auxMotors, setAuxMotors] = useState([]);
+  const [auxMotors, setAuxMotors] = React.useState([]);
 
   // Servos Configuration
-  const [servos, setServos] = useState([]);
+  const [servos, setServos] = React.useState([]);
 
   // Expansion Hub
-  const [hasExpansionHub, setHasExpansionHub] = useState(false);
+  const [hasExpansionHub, setHasExpansionHub] = React.useState(false);
 
   // Odometry Encoder Ports
-  const [odo1Port, setOdo1Port] = useState({ hub: 'control', port: 0 });
-  const [odo2Port, setOdo2Port] = useState({ hub: 'control', port: 1 });
+  const [odo1Port, setOdo1Port] = React.useState({ hub: 'control', port: 0 });
+  const [odo2Port, setOdo2Port] = React.useState({ hub: 'control', port: 1 });
 
   // Robot Name (for save/load)
-  const [robotName, setRobotName] = useState('My Robot');
-  const [savedConfigs, setSavedConfigs] = useState([]);
-  const [showSaveModal, setShowSaveModal] = useState(false);
-  const [showLoadModal, setShowLoadModal] = useState(false);
+  const [robotName, setRobotName] = React.useState('My Robot');
+  const [savedConfigs, setSavedConfigs] = React.useState([]);
+  const [showSaveModal, setShowSaveModal] = React.useState(false);
+  const [showLoadModal, setShowLoadModal] = React.useState(false);
 
   // Blinkin LED Configuration
-  const [hasBlinkin, setHasBlinkin] = useState(false);
-  const [blinkinPort, setBlinkinPort] = useState({ hub: 'control', port: 0 });
-  const [blinkinPatterns, setBlinkinPatterns] = useState([
+  const [hasBlinkin, setHasBlinkin] = React.useState(false);
+  const [blinkinPort, setBlinkinPort] = React.useState({ hub: 'control', port: 0 });
+  const [blinkinPatterns, setBlinkinPatterns] = React.useState([
     { id: 1, name: 'default', pattern: 'solid_green', description: 'Default state' }
   ]);
 
   // Sensors Configuration
-  const [sensors, setSensors] = useState([]);
+  const [sensors, setSensors] = React.useState([]);
 
   // AprilTag Configuration
-  const [aprilTagSize, setAprilTagSize] = useState(165); // mm
-  const [targetTags, setTargetTags] = useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
+  const [aprilTagSize, setAprilTagSize] = React.useState(165); // mm
+  const [targetTags, setTargetTags] = React.useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
 
   // Load saved configs on mount
-  useEffect(() => {
+  React.useEffect(() => {
     const saved = localStorage.getItem('ftc_robot_configs');
     if (saved) {
       setSavedConfigs(JSON.parse(saved));
