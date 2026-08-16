@@ -572,7 +572,7 @@ const FTCRobotConfigurator = () => {
   const generateRobotMacros = () => {
     const DRIVE_STEP_TYPES = ['drive_distance', 'turn_to_heading', 'drive_time', 'drive_to_tag'];
     const exposed = (macros || []).filter(m =>
-      m.pathpilotEnabled && !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.actionType)));
+      m.pathpilotEnabled && !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.type)));
 
     const usedMotors = new Set();
     const usedServos = new Set();
@@ -580,7 +580,7 @@ const FTCRobotConfigurator = () => {
     exposed.forEach(m => (m.steps || []).forEach(st => {
       if (st.motorName) usedMotors.add(st.motorName);
       if (st.servoName) usedServos.add(st.servoName);
-      if (st.actionType === 'led_pattern') usesBlinkin = true;
+      if (st.type === 'led_pattern') usesBlinkin = true;
     }));
 
     const L = [];
@@ -604,6 +604,21 @@ const FTCRobotConfigurator = () => {
     L.push(' */');
     L.push('public class RobotMacros {');
     L.push('');
+    L.push('    /** Time allowed for a servo to reach its commanded position. */');
+    L.push('    public static final double SERVO_SETTLE = 0.30;');
+    if (usesBlinkin) {
+      const pats = new Set();
+      exposed.forEach(m => (m.steps || []).forEach(st => {
+        if (st.type === 'led_pattern') pats.add(String(st.ledPattern || 'DEFAULT'));
+      }));
+      L.push('');
+      Array.from(pats).forEach(p => {
+        const found = (blinkinPatterns || []).find(bp => bp.name === p);
+        const val = found && found.value !== undefined ? found.value : 0.775;
+        L.push(`    public static final double BLINKIN_${p.toUpperCase().replace(/\\s+/g, '_')} = ${val};`);
+      });
+    }
+    L.push('');
     L.push('    private final LinearOpMode opMode;');
     L.push('    private final ElapsedTime timer = new ElapsedTime();');
     Array.from(usedMotors).forEach(n => L.push(`    public DcMotorEx ${n};`));
@@ -617,7 +632,7 @@ const FTCRobotConfigurator = () => {
       L.push(`        ${n}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
     });
     Array.from(usedServos).forEach(n => L.push(`        ${n} = hardwareMap.get(Servo.class, "${n}");`));
-    if (usesBlinkin) L.push(`        blinkin = hardwareMap.get(Servo.class, "${blinkinPort !== undefined ? 'blinkin' : 'blinkin'}");`);
+    if (usesBlinkin) L.push('        blinkin = hardwareMap.get(Servo.class, "blinkin");');
     L.push('    }');
     L.push('');
     L.push('    private boolean active() { return opMode.opModeIsActive(); }');
@@ -634,9 +649,9 @@ const FTCRobotConfigurator = () => {
       L.push(`    /** ${m.name} — ${(m.steps || []).length} step(s) */`);
       L.push(`    public void ${method}() {`);
       (m.steps || []).forEach((st, idx) => {
-        L.push(`        // step ${idx + 1}: ${st.actionType}`);
+        L.push(`        // step ${idx + 1}: ${st.type}`);
         L.push('        if (!active()) return;');
-        switch (st.actionType) {
+        switch (st.type) {
           case 'motor_position':
             L.push(`        ${st.motorName}.setTargetPosition(${st.motorPosition || 0});`);
             L.push(`        ${st.motorName}.setMode(DcMotor.RunMode.RUN_TO_POSITION);`);
@@ -666,16 +681,16 @@ const FTCRobotConfigurator = () => {
           }
           case 'servo_position':
             L.push(`        ${st.servoName}.setPosition(${st.servoPosition !== undefined ? st.servoPosition : 0.5});`);
-            L.push(`        pause(${st.servoSettle !== undefined ? st.servoSettle : 0.3});`);
+            L.push('        pause(SERVO_SETTLE);');
             break;
           case 'wait':
-            L.push(`        pause(${st.waitDuration !== undefined ? st.waitDuration : 1.0});`);
+            L.push(`        pause(${st.duration !== undefined ? st.duration : 1.0});`);
             break;
           case 'led_pattern':
-            L.push(`        blinkin.setPosition(${st.ledPattern !== undefined ? st.ledPattern : 0.775});`);
+            L.push(`        blinkin.setPosition(BLINKIN_${String(st.ledPattern || 'DEFAULT').toUpperCase().replace(/\\s+/g, '_')});`);
             break;
           default:
-            L.push(`        // unsupported step type "${st.actionType}" — nothing generated`);
+            L.push(`        // unsupported step type "${st.type}" — nothing generated`);
         }
         L.push('');
       });
@@ -695,7 +710,7 @@ const FTCRobotConfigurator = () => {
   const buildRobotProfile = () => {
     const DRIVE_STEP_TYPES = ['drive_distance', 'turn_to_heading', 'drive_time', 'drive_to_tag'];
     const isMechanismOnly = (m) =>
-      !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.actionType));
+      !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.type));
 
     const odoPorts = [odo1Port, odo2Port].filter(p => p !== null && p !== undefined);
     const motorOnPort = (port) => (motors || []).find(m => m.port === port);
@@ -3107,7 +3122,7 @@ Make sure your code initializes the IMU with these orientations!
         // so only mechanism-only macros may be exposed to PathPilot.
         const DRIVE_STEPS = actionTypes.filter(a => a.category === 'drive').map(a => a.value);
         const macroDriveSteps = (macro) =>
-          (macro.steps || []).filter(st => DRIVE_STEPS.includes(st.actionType));
+          (macro.steps || []).filter(st => DRIVE_STEPS.includes(st.type));
         const macroIsMechanismOnly = (macro) => macroDriveSteps(macro).length === 0;
 
         const driveDirections = [
@@ -3792,7 +3807,7 @@ Make sure your code initializes the IMU with these orientations!
                             ) : (
                               <span className="block text-xs text-yellow-300 mt-0.5">
                                 Blocked: contains {driveSteps.length} driving step{driveSteps.length > 1 ? 's' : ''}
-                                {' '}({driveSteps.map(d => (actionTypes.find(a => a.value === d.actionType) || {}).label || d.actionType).join(', ')}).
+                                {' '}({driveSteps.map(d => (actionTypes.find(a => a.value === d.type) || {}).label || d.type).join(', ')}).
                                 A macro that drives would fight the path and corrupt odometry. Remove the driving
                                 steps, or place those moves as waypoints in PathPilot instead.
                               </span>
