@@ -1,4 +1,4 @@
-# FTC Robot Configurator
+# FTC Bot Builder
 
 A web-based configuration tool for FTC robots.
 
