@@ -19,6 +19,17 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
+// "Score High" -> scoreHigh. PathPilot emits direct calls rather than string
+// dispatch, so renaming a macro breaks the build loudly instead of silently
+// no-opping at a competition.
+const javaMethodName = (name) => {
+  const parts = String(name || '').replace(/[^A-Za-z0-9 ]/g, ' ').trim().split(/\s+/);
+  if (!parts.length || !parts[0]) return 'macro';
+  return parts.map((w, i) => i === 0
+    ? w.charAt(0).toLowerCase() + w.slice(1)
+    : w.charAt(0).toUpperCase() + w.slice(1)).join('');
+};
+
 const BB_LOGO = "data:image/png;base64,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";
 
 
@@ -546,6 +557,245 @@ const FTCRobotConfigurator = () => {
     const a = document.createElement('a');
     a.href = url;
     a.download = `${robotName.replace(/\s+/g, '_')}_config.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ------------------------------------------------------------------
+  // RobotMacros.java — blocking versions of the PathPilot-flagged macros.
+  //
+  // TeleOp macros are a non-blocking state machine, which is correct there:
+  // blocking would freeze driver control. Autonomous in a LinearOpMode wants
+  // the opposite — shoot() should return when the shot is done. Same macro
+  // definition, two code generation targets.
+  // ------------------------------------------------------------------
+  const generateRobotMacros = () => {
+    const DRIVE_STEP_TYPES = ['drive_distance', 'turn_to_heading', 'drive_time', 'drive_to_tag'];
+    const exposed = (macros || []).filter(m =>
+      m.pathpilotEnabled && !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.actionType)));
+
+    const usedMotors = new Set();
+    const usedServos = new Set();
+    let usesBlinkin = false;
+    exposed.forEach(m => (m.steps || []).forEach(st => {
+      if (st.motorName) usedMotors.add(st.motorName);
+      if (st.servoName) usedServos.add(st.servoName);
+      if (st.actionType === 'led_pattern') usesBlinkin = true;
+    }));
+
+    const L = [];
+    L.push('package org.firstinspires.ftc.teamcode;');
+    L.push('');
+    L.push('import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;');
+    L.push('import com.qualcomm.robotcore.hardware.DcMotor;');
+    L.push('import com.qualcomm.robotcore.hardware.DcMotorEx;');
+    if (usedServos.size || usesBlinkin) L.push('import com.qualcomm.robotcore.hardware.Servo;');
+    L.push('import com.qualcomm.robotcore.hardware.HardwareMap;');
+    L.push('import com.qualcomm.robotcore.util.ElapsedTime;');
+    L.push('');
+    L.push('/**');
+    L.push(' * Blocking mechanism macros, generated by BotBuilder from the macros flagged');
+    L.push(' * "Available in PathPilot". Each method returns when the sequence finishes.');
+    L.push(' *');
+    L.push(' * Only mechanism-only macros appear here. Anything containing a driving step');
+    L.push(' * is excluded, because it would fight the autonomous path and corrupt odometry.');
+    L.push(' *');
+    L.push(' * Regenerated by BotBuilder — do not hand-edit.');
+    L.push(' */');
+    L.push('public class RobotMacros {');
+    L.push('');
+    L.push('    private final LinearOpMode opMode;');
+    L.push('    private final ElapsedTime timer = new ElapsedTime();');
+    Array.from(usedMotors).forEach(n => L.push(`    public DcMotorEx ${n};`));
+    Array.from(usedServos).forEach(n => L.push(`    public Servo ${n};`));
+    if (usesBlinkin) L.push('    public Servo blinkin;');
+    L.push('');
+    L.push('    public RobotMacros(LinearOpMode opMode, HardwareMap hardwareMap) {');
+    L.push('        this.opMode = opMode;');
+    Array.from(usedMotors).forEach(n => {
+      L.push(`        ${n} = hardwareMap.get(DcMotorEx.class, "${n}");`);
+      L.push(`        ${n}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+    });
+    Array.from(usedServos).forEach(n => L.push(`        ${n} = hardwareMap.get(Servo.class, "${n}");`));
+    if (usesBlinkin) L.push(`        blinkin = hardwareMap.get(Servo.class, "${blinkinPort !== undefined ? 'blinkin' : 'blinkin'}");`);
+    L.push('    }');
+    L.push('');
+    L.push('    private boolean active() { return opMode.opModeIsActive(); }');
+    L.push('    private void pause(double seconds) { opMode.sleep((long)(seconds * 1000)); }');
+    L.push('');
+
+    if (exposed.length === 0) {
+      L.push('    // No macros are flagged "Available in PathPilot" yet.');
+      L.push('    // Tick that box on a mechanism-only macro to generate a method here.');
+    }
+
+    exposed.forEach(m => {
+      const method = javaMethodName(m.name);
+      L.push(`    /** ${m.name} — ${(m.steps || []).length} step(s) */`);
+      L.push(`    public void ${method}() {`);
+      (m.steps || []).forEach((st, idx) => {
+        L.push(`        // step ${idx + 1}: ${st.actionType}`);
+        L.push('        if (!active()) return;');
+        switch (st.actionType) {
+          case 'motor_position':
+            L.push(`        ${st.motorName}.setTargetPosition(${st.motorPosition || 0});`);
+            L.push(`        ${st.motorName}.setMode(DcMotor.RunMode.RUN_TO_POSITION);`);
+            L.push(`        ${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 0.8});`);
+            L.push('        timer.reset();');
+            L.push(`        while (active() && ${st.motorName}.isBusy() && timer.seconds() < 4.0) opMode.idle();`);
+            L.push(`        ${st.motorName}.setPower(0);`);
+            L.push(`        ${st.motorName}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+            break;
+          case 'motor_time':
+            L.push(`        ${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+            L.push(`        pause(${st.motorDuration !== undefined ? st.motorDuration : 1.0});`);
+            L.push(`        ${st.motorName}.setPower(0);`);
+            break;
+          case 'motor_until_velocity':
+            L.push(`        ${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+            L.push('        timer.reset();');
+            L.push(`        while (active() && Math.abs(${st.motorName}.getVelocity()) < ${st.targetVelocity || 0}`);
+            L.push(`               && timer.seconds() < ${st.velocityTimeout || 3.0}) opMode.idle();`);
+            break;
+          case 'wait_velocity': {
+            const cmp = st.velocityCondition === 'below' ? '>' : '<';
+            L.push('        timer.reset();');
+            L.push(`        while (active() && Math.abs(${st.motorName}.getVelocity()) ${cmp} ${st.targetVelocity || 0}`);
+            L.push(`               && timer.seconds() < ${st.velocityTimeout || 3.0}) opMode.idle();`);
+            break;
+          }
+          case 'servo_position':
+            L.push(`        ${st.servoName}.setPosition(${st.servoPosition !== undefined ? st.servoPosition : 0.5});`);
+            L.push(`        pause(${st.servoSettle !== undefined ? st.servoSettle : 0.3});`);
+            break;
+          case 'wait':
+            L.push(`        pause(${st.waitDuration !== undefined ? st.waitDuration : 1.0});`);
+            break;
+          case 'led_pattern':
+            L.push(`        blinkin.setPosition(${st.ledPattern !== undefined ? st.ledPattern : 0.775});`);
+            break;
+          default:
+            L.push(`        // unsupported step type "${st.actionType}" — nothing generated`);
+        }
+        L.push('');
+      });
+      L.push('    }');
+      L.push('');
+    });
+
+    L.push('}');
+    return L.join('\n');
+  };
+
+  // ------------------------------------------------------------------
+  // Robot profile export — the contract PathPilot consumes.
+  // See ROBOT-PROFILE-SCHEMA.md. Only values describing the physical robot
+  // belong here; path-following settings stay in PathPilot.
+  // ------------------------------------------------------------------
+  const buildRobotProfile = () => {
+    const DRIVE_STEP_TYPES = ['drive_distance', 'turn_to_heading', 'drive_time', 'drive_to_tag'];
+    const isMechanismOnly = (m) =>
+      !(m.steps || []).some(st => DRIVE_STEP_TYPES.includes(st.actionType));
+
+    const odoPorts = [odo1Port, odo2Port].filter(p => p !== null && p !== undefined);
+    const motorOnPort = (port) => (motors || []).find(m => m.port === port);
+
+    // Which pod measures which axis
+    const parallelIsOdo1 = odo1Measures !== 'strafe';
+    const podFor = (isFirst) => {
+      const type = isFirst ? odo1Type : odo2Type;
+      const port = isFirst ? odo1Port : odo2Port;
+      const rev = isFirst ? odo1Reversed : odo2Reversed;
+      const fromRight = isFirst ? odo1FromRight : odo2FromRight;
+      const fromBack = isFirst ? odo1FromBack : odo2FromBack;
+      const host = motorOnPort(port);
+      return {
+        hardwareName: host ? host.name : null,
+        port: port === undefined ? null : port,
+        reversed: !!rev,
+        ticksPerInch: null,
+        xOffsetIn: (Number(robotWidth) / 2) - Number(fromRight || 0),
+        yOffsetIn: Number(fromBack || 0) - (Number(robotLength) / 2),
+        podType: type || null
+      };
+    };
+
+    const exposedMacros = (macros || [])
+      .filter(m => m.pathpilotEnabled && isMechanismOnly(m))
+      .map(m => ({
+        name: m.name,
+        method: javaMethodName(m.name),
+        stepCount: (m.steps || []).length
+      }));
+
+    const warnings = [];
+    odoPorts.forEach(p => {
+      const host = motorOnPort(p);
+      if (host) warnings.push(
+        `Odometry pod occupies encoder port ${p}, which belongs to drive motor "${host.name}". ` +
+        `That motor has no usable built-in encoder — do not use RUN_USING_ENCODER, ` +
+        `RUN_TO_POSITION, or getVelocity() on it.`);
+    });
+    (macros || []).forEach(m => {
+      if (m.pathpilotEnabled && !isMechanismOnly(m))
+        warnings.push(`Macro "${m.name}" is flagged for PathPilot but contains driving steps; it was excluded.`);
+    });
+    warnings.push('Odometry is uncalibrated in BotBuilder. Run OdometryCalibration and paste the measured values into Localizer.java.');
+
+    return {
+      pathpilotProfile: 1,
+      name: robotName,
+      generatedBy: 'BotBuilder v5.0',
+      updatedAt: new Date().toISOString(),
+      chassis: {
+        type: 'mecanum',
+        lengthIn: Number(robotLength),
+        widthIn: Number(robotWidth),
+        heightIn: null,
+        weightLb: null
+      },
+      drive: {
+        motors: Object.fromEntries((motors || []).map(m => [m.name, {
+          hardwareName: m.name, port: m.port, reversed: !!m.reversed
+        }])),
+        wheelDiameterIn: Number(wheelSize) || null,
+        measured: { maxVelocityInPerSec: null, maxAccelInPerSec2: null, maxTurnRateDegPerSec: null }
+      },
+      odometry: {
+        type: 'twoPodImu',
+        parallel: podFor(parallelIsOdo1),
+        perpendicular: podFor(!parallelIsOdo1),
+        calibration: { status: 'uncalibrated', date: null }
+      },
+      imu: {
+        source: imuLocation || 'controlHub',
+        logoDirection: imuLogoDirection,
+        usbDirection: imuUsbDirection
+      },
+      limelight: limelightVersion ? {
+        present: true, model: limelightVersion,
+        xOffsetIn: (Number(robotWidth) / 2) - Number(limelightFromRight || 0),
+        yOffsetIn: Number(limelightFromBack || 0) - (Number(robotLength) / 2),
+        heightIn: Number(limelightHeight) || null,
+        facing: limelightFacing, pipeline: 0,
+        tagSizeMm: Number(aprilTagSize) || null
+      } : { present: false },
+      auxMotors: (auxMotors || []).map(m => ({
+        hardwareName: m.name, port: m.port, reversed: !!m.reversed
+      })),
+      servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
+      macros: exposedMacros,
+      warnings
+    };
+  };
+
+  const exportRobotProfile = () => {
+    const profile = buildRobotProfile();
+    const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${robotName.replace(/\s+/g, '_')}_profile.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -2853,6 +3103,13 @@ Make sure your code initializes the IMU with these orientations!
           { value: 'led_pattern', label: '💡 Set LED Pattern', icon: '💡', category: 'other' }
         ];
 
+        // A macro that drives fights the autonomous path and corrupts odometry,
+        // so only mechanism-only macros may be exposed to PathPilot.
+        const DRIVE_STEPS = actionTypes.filter(a => a.category === 'drive').map(a => a.value);
+        const macroDriveSteps = (macro) =>
+          (macro.steps || []).filter(st => DRIVE_STEPS.includes(st.actionType));
+        const macroIsMechanismOnly = (macro) => macroDriveSteps(macro).length === 0;
+
         const driveDirections = [
           { value: 'forward', label: 'Forward' },
           { value: 'backward', label: 'Backward' },
@@ -2870,6 +3127,7 @@ Make sure your code initializes the IMU with these orientations!
             triggerCombo: null,
             triggerController: 'gamepad2',
             behavior: 'press', // 'press' or 'hold'
+            pathpilotEnabled: false, // expose as a PathPilot waypoint action
             steps: []
           };
           setMacros([...macros, newMacro]);
@@ -3509,6 +3767,41 @@ Make sure your code initializes the IMU with these orientations!
                     </div>
                     )}
                   </div>
+
+                  {/* PathPilot exposure */}
+                  {(() => {
+                    const driveSteps = macroDriveSteps(editingMacro);
+                    const eligible = driveSteps.length === 0;
+                    return (
+                      <div className={`mt-3 p-2 rounded border ${eligible ? 'border-gray-600 bg-gray-800' : 'border-yellow-700 bg-yellow-900 bg-opacity-20'}`}>
+                        <label className={`flex items-start gap-2 text-sm ${eligible ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'}`}>
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            disabled={!eligible}
+                            checked={eligible && !!editingMacro.pathpilotEnabled}
+                            onChange={(e) => updateMacro(editingMacro.id, 'pathpilotEnabled', e.target.checked)}
+                          />
+                          <span>
+                            <span className="text-gray-200">Available in PathPilot</span>
+                            {eligible ? (
+                              <span className="block text-xs text-gray-400 mt-0.5">
+                                Exposes this macro as a waypoint action. Generates a blocking
+                                <code className="text-blue-400"> {javaMethodName(editingMacro.name)}()</code> for autonomous.
+                              </span>
+                            ) : (
+                              <span className="block text-xs text-yellow-300 mt-0.5">
+                                Blocked: contains {driveSteps.length} driving step{driveSteps.length > 1 ? 's' : ''}
+                                {' '}({driveSteps.map(d => (actionTypes.find(a => a.value === d.actionType) || {}).label || d.actionType).join(', ')}).
+                                A macro that drives would fight the path and corrupt odometry. Remove the driving
+                                steps, or place those moves as waypoints in PathPilot instead.
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Steps */}
@@ -4444,6 +4737,13 @@ Make sure your code initializes the IMU with these orientations!
               className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded text-sm font-medium"
             >
               ⬇️ Export
+            </button>
+            <button
+              onClick={exportRobotProfile}
+              title="Robot profile for PathPilot — dimensions, odometry, and macros flagged as PathPilot-available"
+              className="bg-blue-700 hover:bg-blue-800 text-white px-4 py-2 rounded text-sm font-medium"
+            >
+              🧭 Profile
             </button>
             <label className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded text-sm font-medium cursor-pointer">
               ⬆️ Import
