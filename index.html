@@ -59,6 +59,14 @@ const FTCRobotConfigurator = () => {
   const [odo2Reversed, setOdo2Reversed] = React.useState(false);
   const [odo2Measures, setOdo2Measures] = React.useState('left_right');
 
+  // Measured calibration results (from the generated OdometryCalibration OpMode).
+  // Empty string means "not measured" — distinct from a measured value of 0.
+  const [calParallelTPI, setCalParallelTPI] = React.useState('');
+  const [calPerpTPI, setCalPerpTPI] = React.useState('');
+  const [calParallelXOffset, setCalParallelXOffset] = React.useState('');
+  const [calPerpYOffset, setCalPerpYOffset] = React.useState('');
+  const [calDate, setCalDate] = React.useState('');
+
   // IMU Configuration
   const [imuLocation, setImuLocation] = React.useState('control_hub');
   const [imuLogoDirection, setImuLogoDirection] = React.useState('UP');
@@ -346,6 +354,22 @@ const FTCRobotConfigurator = () => {
     };
   };
 
+  // A value counts as measured only if it was actually typed in.
+  const num = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
+  const calibration = (() => {
+    const vals = [num(calParallelTPI), num(calPerpTPI), num(calParallelXOffset), num(calPerpYOffset)];
+    const have = vals.filter(v => v !== null && !Number.isNaN(v)).length;
+    return {
+      parallelTPI: num(calParallelTPI),
+      perpTPI: num(calPerpTPI),
+      parallelXOffset: num(calParallelXOffset),
+      perpYOffset: num(calPerpYOffset),
+      date: calDate || null,
+      status: have === 4 ? 'calibrated' : have === 0 ? 'uncalibrated' : 'partial',
+      have
+    };
+  })();
+
   const offsets = calculateOffsets();
   const odo1Specs = odoDatabase[odo1Type];
   const odo2Specs = odoDatabase[odo2Type];
@@ -431,6 +455,7 @@ const FTCRobotConfigurator = () => {
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
       odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub,
@@ -479,6 +504,11 @@ const FTCRobotConfigurator = () => {
     setOdo2Reversed(config.odo2Reversed || false);
     setOdo2Measures(config.odo2Measures || 'left_right');
     setOdo2Port(config.odo2Port || { hub: 'control', port: 1 });
+    setCalParallelTPI(config.calParallelTPI !== undefined ? config.calParallelTPI : '');
+    setCalPerpTPI(config.calPerpTPI !== undefined ? config.calPerpTPI : '');
+    setCalParallelXOffset(config.calParallelXOffset !== undefined ? config.calParallelXOffset : '');
+    setCalPerpYOffset(config.calPerpYOffset !== undefined ? config.calPerpYOffset : '');
+    setCalDate(config.calDate || '');
     setImuLocation(config.imuLocation || 'control_hub');
     setImuLogoDirection(config.imuLogoDirection || 'UP');
     setImuUsbDirection(config.imuUsbDirection || 'FORWARD');
@@ -540,6 +570,7 @@ const FTCRobotConfigurator = () => {
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
       odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub,
@@ -701,6 +732,16 @@ const FTCRobotConfigurator = () => {
       const fromBack = isFirst ? odo1FromBack : odo2FromBack;
       const host = motorOnPort(port);
       const spec = odoDatabase[type];
+      const isParallel = isFirst === parallelIsOdo1;
+
+      // Measured beats theoretical. Only the parallel pod's X offset and the
+      // perpendicular pod's Y offset enter the pose maths, so those are the two
+      // the spin test produces and the two that get overridden.
+      const measuredTPI = isParallel ? calibration.parallelTPI : calibration.perpTPI;
+      const theoreticalTPI = spec ? Math.round(spec.ticksPerInch * 10) / 10 : null;
+      const geometricX = (Number(robotWidth) / 2) - Number(fromRight || 0);
+      const geometricY = Number(fromBack || 0) - (Number(robotLength) / 2);
+
       return {
         // The encoder plugs into a motor port and is read through that motor's
         // object. Null means nothing is configured on that port.
@@ -708,9 +749,17 @@ const FTCRobotConfigurator = () => {
         hub: port && port.hub ? port.hub : 'control',
         port: port && port.port !== undefined ? port.port : null,
         reversed: !!rev,
-        ticksPerInch: spec ? Math.round(spec.ticksPerInch * 10) / 10 : null,
-        xOffsetIn: (Number(robotWidth) / 2) - Number(fromRight || 0),
-        yOffsetIn: Number(fromBack || 0) - (Number(robotLength) / 2),
+        ticksPerInch: (measuredTPI !== null && !Number.isNaN(measuredTPI)) ? measuredTPI : theoreticalTPI,
+        ticksPerInchSource: (measuredTPI !== null && !Number.isNaN(measuredTPI)) ? 'measured' : 'theoretical',
+        xOffsetIn: (isParallel && calibration.parallelXOffset !== null && !Number.isNaN(calibration.parallelXOffset))
+          ? calibration.parallelXOffset : geometricX,
+        yOffsetIn: (!isParallel && calibration.perpYOffset !== null && !Number.isNaN(calibration.perpYOffset))
+          ? calibration.perpYOffset : geometricY,
+        offsetSource: isParallel
+          ? ((calibration.parallelXOffset !== null && !Number.isNaN(calibration.parallelXOffset)) ? 'measured' : 'geometric')
+          : ((calibration.perpYOffset !== null && !Number.isNaN(calibration.perpYOffset)) ? 'measured' : 'geometric'),
+        geometricXOffsetIn: geometricX,
+        geometricYOffsetIn: geometricY,
         podType: type || null
       };
     };
@@ -774,7 +823,11 @@ const FTCRobotConfigurator = () => {
         profileWarnings.push('Macro "' + mm.name + '" is flagged for PathPilot but has no steps; it generates an empty method.');
     });
 
-    profileWarnings.push('Odometry is uncalibrated. Run OdometryCalibration and paste the measured values in.');
+    if (calibration.status !== 'calibrated') {
+      profileWarnings.push(calibration.status === 'partial'
+        ? `Odometry is only partially calibrated (${calibration.have} of 4 values measured); the rest are theoretical.`
+        : 'Odometry is uncalibrated. Run the Odometry Calibration OpMode and enter its results in the Odometry tab.');
+    }
 
     return {
       pathpilotProfile: 1,
@@ -800,7 +853,7 @@ const FTCRobotConfigurator = () => {
         type: 'twoPodImu',
         parallel: par,
         perpendicular: per,
-        calibration: { status: 'uncalibrated', date: null }
+        calibration: { status: calibration.status, date: calibration.date }
       },
       imu: {
         source: imuLocation || 'control_hub',
@@ -856,6 +909,16 @@ const FTCRobotConfigurator = () => {
     const perRev = parallelIsOdo1 ? odo2Reversed : odo1Reversed;
     const parSpec = odoDatabase[parallelIsOdo1 ? odo1Type : odo2Type];
     const perSpec = odoDatabase[parallelIsOdo1 ? odo2Type : odo1Type];
+    // Re-running against measured values shows drift from the last calibration
+    // rather than from theory, which is the more useful comparison.
+    const parTPI = (calibration.parallelTPI !== null && !Number.isNaN(calibration.parallelTPI))
+      ? calibration.parallelTPI : (parSpec ? parSpec.ticksPerInch : 505.2);
+    const perTPI = (calibration.perpTPI !== null && !Number.isNaN(calibration.perpTPI))
+      ? calibration.perpTPI : (perSpec ? perSpec.ticksPerInch : 505.2);
+    const parXOff = (calibration.parallelXOffset !== null && !Number.isNaN(calibration.parallelXOffset))
+      ? calibration.parallelXOffset : 0;
+    const perYOff = (calibration.perpYOffset !== null && !Number.isNaN(calibration.perpYOffset))
+      ? calibration.perpYOffset : 0;
 
     const className = robotName.replace(/[^A-Za-z0-9]/g, '') + 'OdometryCalibration';
     const L = [];
@@ -910,9 +973,11 @@ const FTCRobotConfigurator = () => {
       `    public static final boolean PARALLEL_REVERSED = ${!!parRev};`,
       `    public static final boolean PERPENDICULAR_REVERSED = ${!!perRev};`,
       '',
-      '    // Theoretical, from wheel diameter and counts per revolution.',
-      `    public static final double PARALLEL_TICKS_PER_INCH = ${parSpec ? parSpec.ticksPerInch.toFixed(1) : '505.2'};`,
-      `    public static final double PERPENDICULAR_TICKS_PER_INCH = ${perSpec ? perSpec.ticksPerInch.toFixed(1) : '505.2'};`,
+      `    // ${calibration.status === 'calibrated' ? 'MEASURED ' + (calibration.date || '') : calibration.status === 'partial' ? 'PARTLY MEASURED - the rest are theoretical' : 'THEORETICAL - not yet measured'}`,
+      `    public static final double PARALLEL_TICKS_PER_INCH = ${parTPI.toFixed(1)};`,
+      `    public static final double PERPENDICULAR_TICKS_PER_INCH = ${perTPI.toFixed(1)};`,
+      `    public static final double PARALLEL_X_OFFSET = ${parXOff};`,
+      `    public static final double PERPENDICULAR_Y_OFFSET = ${perYOff};`,
       '',
       `    public static final double STRAIGHT_TEST_INCHES = 48.0;`,
       `    public static final double STRAFE_TEST_INCHES = 48.0;`,
@@ -1138,8 +1203,8 @@ const FTCRobotConfigurator = () => {
       '        telemetry.addLine("RESULTS  (type these into BotBuilder)");',
       '        report("parallel ticks/inch", straightTicksPerInch, PARALLEL_TICKS_PER_INCH);',
       '        report("perp ticks/inch", strafeTicksPerInch, PERPENDICULAR_TICKS_PER_INCH);',
-      '        report("parallel X offset", parallelXOffset, 0);',
-      '        report("perp Y offset", perpendicularYOffset, 0);',
+      '        report("parallel X offset", parallelXOffset, PARALLEL_X_OFFSET);',
+      '        report("perp Y offset", perpendicularYOffset, PERPENDICULAR_Y_OFFSET);',
       '    }',
       '',
       '    private void report(String name, double measured, double current) {',
@@ -2332,6 +2397,128 @@ Make sure your code initializes the IMU with these orientations!
                   Ticks per inch: <span className="text-green-400 font-mono">{odo2Specs.ticksPerInch.toFixed(1)}</span>
                 </div>
               </div>
+            </div>
+
+            {/* Measured calibration */}
+            <div className={`p-4 rounded-lg border ${
+              calibration.status === 'calibrated' ? 'bg-green-900 bg-opacity-20 border-green-700'
+              : calibration.status === 'partial' ? 'bg-yellow-900 bg-opacity-20 border-yellow-700'
+              : 'bg-gray-700 border-gray-600'}`}>
+              <div className="flex justify-between items-center mb-2">
+                <h4 className="text-lg font-semibold text-green-400">Measured Calibration</h4>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  calibration.status === 'calibrated' ? 'bg-green-700 text-green-100'
+                  : calibration.status === 'partial' ? 'bg-yellow-700 text-yellow-100'
+                  : 'bg-gray-600 text-gray-300'}`}>
+                  {calibration.status === 'calibrated' ? 'calibrated'
+                    : calibration.status === 'partial' ? `partial (${calibration.have}/4)`
+                    : 'not measured'}
+                </span>
+              </div>
+              <p className="text-xs text-gray-400 mb-3">
+                Run the <strong>Odometry Calibration</strong> OpMode from the Code tab, then type its four
+                results here. These override the theoretical values everywhere — the robot profile, generated
+                autos, and the calibration OpMode itself. Leave blank to keep using theory.
+              </p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Parallel ticks / inch</label>
+                  <input
+                    type="number" step="0.1" value={calParallelTPI}
+                    placeholder={`theory ${odoDatabase[odo1Measures === 'forward_back' ? odo1Type : odo2Type].ticksPerInch.toFixed(1)}`}
+                    onChange={(e) => setCalParallelTPI(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  />
+                  {(() => {
+                    const theory = odoDatabase[odo1Measures === 'forward_back' ? odo1Type : odo2Type].ticksPerInch;
+                    const m = num(calParallelTPI);
+                    if (m === null || Number.isNaN(m) || !theory) return null;
+                    const pct = (m - theory) / theory * 100;
+                    return <span className={`text-xs ${Math.abs(pct) > 10 ? 'text-red-400' : 'text-gray-400'}`}>
+                      {pct >= 0 ? '+' : ''}{pct.toFixed(1)}% vs theory{Math.abs(pct) > 10 ? ' — check the push distance' : ''}
+                    </span>;
+                  })()}
+                </div>
+
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Perpendicular ticks / inch</label>
+                  <input
+                    type="number" step="0.1" value={calPerpTPI}
+                    placeholder={`theory ${odoDatabase[odo1Measures === 'forward_back' ? odo2Type : odo1Type].ticksPerInch.toFixed(1)}`}
+                    onChange={(e) => setCalPerpTPI(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  />
+                  {(() => {
+                    const theory = odoDatabase[odo1Measures === 'forward_back' ? odo2Type : odo1Type].ticksPerInch;
+                    const m = num(calPerpTPI);
+                    if (m === null || Number.isNaN(m) || !theory) return null;
+                    const pct = (m - theory) / theory * 100;
+                    return <span className={`text-xs ${Math.abs(pct) > 10 ? 'text-red-400' : 'text-gray-400'}`}>
+                      {pct >= 0 ? '+' : ''}{pct.toFixed(1)}% vs theory{Math.abs(pct) > 10 ? ' — check the push distance' : ''}
+                    </span>;
+                  })()}
+                </div>
+
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Parallel X offset (in)</label>
+                  <input
+                    type="number" step="0.01" value={calParallelXOffset}
+                    placeholder={`measured ${offsets.odo1.x.toFixed(2)}`}
+                    onChange={(e) => setCalParallelXOffset(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  />
+                  <span className="text-xs text-gray-400">+ right of the turning centre</span>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Perpendicular Y offset (in)</label>
+                  <input
+                    type="number" step="0.01" value={calPerpYOffset}
+                    placeholder={`measured ${offsets.odo2.y.toFixed(2)}`}
+                    onChange={(e) => setCalPerpYOffset(e.target.value)}
+                    className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                  />
+                  <span className="text-xs text-gray-400">+ forward of the turning centre</span>
+                </div>
+
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-400 mb-1">Date measured</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="date" value={calDate}
+                      onChange={(e) => setCalDate(e.target.value)}
+                      className="flex-1 bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    />
+                    <button
+                      onClick={() => setCalDate(new Date().toISOString().slice(0, 10))}
+                      className="bg-gray-600 hover:bg-gray-500 text-white px-3 py-2 rounded text-sm"
+                    >
+                      Today
+                    </button>
+                    <button
+                      onClick={() => { setCalParallelTPI(''); setCalPerpTPI(''); setCalParallelXOffset(''); setCalPerpYOffset(''); setCalDate(''); }}
+                      className="bg-red-800 hover:bg-red-700 text-white px-3 py-2 rounded text-sm"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {calibration.status === 'partial' && (
+                <p className="text-xs text-yellow-300 mt-3">
+                  Only {calibration.have} of 4 filled in. The rest still use theoretical values, and the profile
+                  will report the odometry as uncalibrated.
+                </p>
+              )}
+              {calibration.status === 'calibrated' &&
+                calibration.parallelXOffset === calibration.perpYOffset && (
+                <p className="text-xs text-yellow-300 mt-3">
+                  Both offsets are identical ({calibration.parallelXOffset}). That is possible but unusual —
+                  worth re-running the spin test to confirm.
+                </p>
+              )}
             </div>
           </div>
         );
