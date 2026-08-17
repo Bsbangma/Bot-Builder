@@ -135,6 +135,11 @@ const FTCRobotConfigurator = () => {
     { id: 4, name: 'backRight', type: 'gobilda_5203_26_9', hub: 'control', port: 2, reversed: false }
   ]);
 
+  // Zero-power behaviour. Drive is global — a robot with three motors braking
+  // and one coasting is never what anyone wants. Aux is per motor, because a
+  // climbing arm needs to hold position while an intake is better left free.
+  const [driveZeroPower, setDriveZeroPower] = React.useState('BRAKE');
+
   // Auxiliary Motors Configuration (arm, intake, etc.)
   const [auxMotors, setAuxMotors] = React.useState([]);
 
@@ -567,7 +572,7 @@ const FTCRobotConfigurator = () => {
       calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
-      motors, auxMotors, servos, hasExpansionHub,
+      motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
@@ -629,7 +634,8 @@ const FTCRobotConfigurator = () => {
     setLimelightHeight(config.limelightHeight || 8);
     setLimelightFacing(config.limelightFacing || 'FORWARD');
     setMotors(config.motors || []);
-    setAuxMotors(config.auxMotors || []);
+    setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', ...m })));
+    setDriveZeroPower(config.driveZeroPower || 'BRAKE');
     setServos(config.servos || []);
     setHasExpansionHub(config.hasExpansionHub || false);
     setHasBlinkin(config.hasBlinkin || false);
@@ -685,7 +691,7 @@ const FTCRobotConfigurator = () => {
       calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
-      motors, auxMotors, servos, hasExpansionHub,
+      motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
@@ -960,6 +966,9 @@ const FTCRobotConfigurator = () => {
         motors: Object.fromEntries((motors || []).map(mm => [mm.name, {
           hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed
         }])),
+        // Recorded for reference. PathPilot forces BRAKE in autonomous whatever
+        // this says, because a coasting robot cannot settle inside tolerance.
+        teleopZeroPower: driveZeroPower,
         wheelDiameterMm: Number(wheelSize) || null,
         wheelDiameterIn: wheelSize ? Math.round((Number(wheelSize) / 25.4) * 1000) / 1000 : null,
         measured: { maxVelocityInPerSec: null, maxAccelInPerSec2: null, maxTurnRateDegPerSec: null }
@@ -985,7 +994,8 @@ const FTCRobotConfigurator = () => {
       } : { present: false },
       blinkin: hasBlinkin ? { present: true, hardwareName: 'blinkin' } : { present: false },
       auxMotors: (auxMotors || []).map(mm => ({
-        hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed
+        hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed,
+        zeroPower: mm.zeroPower || 'FLOAT'
       })),
       servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
       macros: exposedMacros,
@@ -1405,13 +1415,15 @@ const FTCRobotConfigurator = () => {
   // Generate code snippet
   const generateCodeSnippet = () => {
     const driveMotorCode = motors.map(m => 
-      `${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
-${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`
+      `${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${m.name}");
+${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${driveZeroPower});`
     ).join('\n');
 
     const auxMotorCode = auxMotors.map(m => 
-      `${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
-${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`
+      `${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${m.name}");
+${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});`
     ).join('\n');
 
     const servoCode = servos.map(s => 
@@ -1729,12 +1741,15 @@ ${hasOdometry ? `    // Odometry constants (using configured pods)
     @Override
     public void runOpMode() {
         // Initialize drive motors
+        // Zero power behaviour: ${driveZeroPower} (set in BotBuilder's Drive tab)
 ${motors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${m.name}");
-        ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}
+        ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+        ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${driveZeroPower});`).join('\n')}
 
 ${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx for velocity)
 ${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${m.name}");
         ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+        ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});
         ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
@@ -2997,6 +3012,29 @@ Make sure your code initializes the IMU with these orientations!
             </div>
 
             <div className="bg-gray-700 p-3 rounded-lg">
+              <label className="block text-sm text-gray-300 mb-1">Zero Power Behavior (all drive motors)</label>
+              <select
+                value={driveZeroPower}
+                onChange={(e) => setDriveZeroPower(e.target.value)}
+                className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+              >
+                <option value="BRAKE">BRAKE — resist rotation when power is zero</option>
+                <option value="FLOAT">FLOAT — coast freely when power is zero</option>
+              </select>
+              <p className="text-xs text-gray-400 mt-2">
+                Applies to every drive motor. Autonomous always uses BRAKE regardless of this
+                setting — a coasting robot cannot settle inside tolerance, so driveTo would
+                hunt past the target forever.
+              </p>
+              {driveZeroPower === 'FLOAT' && (
+                <p className="text-xs text-yellow-300 mt-2">
+                  FLOAT means the robot keeps rolling when you release the sticks. Fine for a
+                  light robot on smooth tile, awkward for precise placement.
+                </p>
+              )}
+            </div>
+
+            <div className="bg-gray-700 p-3 rounded-lg">
               <label className="flex items-center space-x-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -3024,7 +3062,8 @@ Make sure your code initializes the IMU with these orientations!
                     type: 'gobilda_5203_26_9', 
                     hub: 'expansion', 
                     port: 0, 
-                    reversed: false 
+                    reversed: false,
+                    zeroPower: 'FLOAT'
                   }]);
                 }}
                 className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
@@ -3126,8 +3165,8 @@ Make sure your code initializes the IMU with these orientations!
                           </optgroup>
                         </select>
                       </div>
-                      <div className="col-span-2">
-                        <label className="flex items-center space-x-2 cursor-pointer">
+                      <div>
+                        <label className="flex items-center space-x-2 cursor-pointer mt-5">
                           <input
                             type="checkbox"
                             checked={motor.reversed}
@@ -3141,6 +3180,22 @@ Make sure your code initializes the IMU with these orientations!
                           />
                           <span className="text-gray-300 text-sm">Reverse Direction</span>
                         </label>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Zero Power</label>
+                        <select
+                          value={motor.zeroPower || 'FLOAT'}
+                          onChange={(e) => {
+                            const updated = auxMotors.map(m =>
+                              m.id === motor.id ? {...m, zeroPower: e.target.value} : m
+                            );
+                            setAuxMotors(updated);
+                          }}
+                          className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        >
+                          <option value="FLOAT">FLOAT — coast</option>
+                          <option value="BRAKE">BRAKE — hold position</option>
+                        </select>
                       </div>
                     </div>
                     <div className="mt-2 text-xs text-gray-400">
