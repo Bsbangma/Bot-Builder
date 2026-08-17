@@ -1,4 +1,4 @@
-# FTC Bot Builder
+# FTC Bot Builder Pro
 
 A web-based configuration tool for FTC robots.
 
