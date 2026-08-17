@@ -1741,6 +1741,12 @@ import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+${hasLimelight ? `import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.Limelight3A;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import org.firstinspires.ftc.robotcore.external.navigation.Position;
+import java.util.List;` : ''}
 ${(() => {
   const need = new Set();
   (sensors || []).forEach(sn => {
@@ -1774,10 +1780,22 @@ ${sensors.map(sn => {
     // IMU
     private IMU imu;
 
+${hasLimelight ? `    // Limelight
+    private Limelight3A limelight;` : ''}
+
 ${hasBlinkin ? `    // Blinkin LED
     private Servo blinkin;
 ${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toUpperCase().replace(/\s+/g, '_')} = ${blinkinDatabase[p.pattern]?.ftcValue.toFixed(3)};`).join('\n')}` : ''}
 
+${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values — raise the gains
+    // until the robot starts hunting, then back off.
+    private static final double TAG_DRIVE_GAIN = 0.030;
+    private static final double TAG_STRAFE_GAIN = 0.030;
+    private static final double TAG_TURN_GAIN = 0.015;
+    private static final double TAG_MAX_POWER = 0.45;
+    private static final double TAG_ANGLE_TOLERANCE = 3.0;
+    private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
+` : ''}
     // Field-oriented driving
     private double headingOffset = 0;
 ${driveLayout().kind === 'mecanum' ? `    /** Field-oriented until the driver toggles it off. */
@@ -1842,6 +1860,11 @@ ${sensors.map(sn => {
   return code;
 }).join('\n')}` : ''}
 
+${hasLimelight ? `        // Initialize Limelight
+        limelight = hardwareMap.get(Limelight3A.class, "limelight");
+        limelight.pipelineSwitch(0);
+        limelight.start();
+` : ''}
         // Initialize IMU
         imu = hardwareMap.get(IMU.class, "imu");
         RevHubOrientationOnRobot.LogoFacingDirection logoDirection = RevHubOrientationOnRobot.LogoFacingDirection.${imuLogoDirection};
@@ -2101,10 +2124,21 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
 `;
         break;
       case 'drive_to_tag':
-        macroCode += `                        // Drive to AprilTag ${step.tagId} at ${step.distance}" with offset ${step.offset}
-                        // TODO: Implement Limelight-based navigation
-                        // For now, skip this step
-                        macroStep++;
+        macroCode += `                        // Drive to AprilTag ${step.tagId}: ${step.distance} in away, offset ${step.offset} in
+                        if (!macroStepStarted) {
+                            macroTimer.reset();
+                            macroStepStarted = true;
+                        }
+                        if (stepTowardTag(${step.tagId}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
+                            macroStep++;
+                            macroStepStarted = false;
+                        } else if (macroTimer.seconds() >= TAG_SEEK_TIMEOUT) {
+                            // Give up rather than hold the drivetrain hostage. The
+                            // tag may be out of view or the robot may be stuck.
+                            stopDrive();
+                            macroStep++;
+                            macroStepStarted = false;
+                        }
                         break;
 `;
         break;
@@ -2226,8 +2260,20 @@ ${macros.length > 0 ? `            if (activeMacro != -1) {
             }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
 ${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}
-${telemetryAprilTag ? `            // AprilTag telemetry would go here (requires Limelight integration)
-            telemetry.addData("Tag", "N/A");` : ''}
+${telemetryAprilTag ? (hasLimelight ? `            {
+                // One line: which target is visible, how far, and how far off centre.
+                int[] wanted = { ${(targetTags || []).length ? targetTags.map(t => t.tagId).join(', ') : '20, 24'} };
+                String tagLine = "none visible";
+                for (int id : wanted) {
+                    double range = tagRangeInches(id);
+                    if (range >= 0) {
+                        tagLine = String.format("#%d  %.1fin  %+.1f deg", id, range, tagBearingDegrees(id));
+                        break;
+                    }
+                }
+                telemetry.addData("Tag", tagLine);
+            }` : `            // AprilTag telemetry needs a Limelight. Enable it in BotBuilder's
+            // Limelight tab to generate this.`) : ''}
 ${telemetryDriveMotors ? (() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
@@ -2288,7 +2334,119 @@ ${telemetryAlerts ? `            // Alerts
             }` : ''}
             telemetry.update();
         }
+${hasLimelight ? `        limelight.stop();` : ''}
     }
+${hasLimelight ? `
+    /**
+     * Camera-space position of a tag, or null when it is not currently visible.
+     * x is right, z is forward, both in metres.
+     */
+    private Position seeTag(int tagId) {
+        if (limelight == null) return null;
+        LLResult result = limelight.getLatestResult();
+        if (result == null || !result.isValid()) return null;
+        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();
+        if (detections == null) return null;
+        for (LLResultTypes.FiducialResult d : detections) {
+            if (d.getFiducialId() == tagId) {
+                Pose3D pose = d.getTargetPoseCameraSpace();
+                return pose == null ? null : pose.getPosition();
+            }
+        }
+        return null;
+    }
+
+    /** Straight-line distance to a tag in inches, or -1 when not visible. */
+    private double tagRangeInches(int tagId) {
+        Position p = seeTag(tagId);
+        return p == null ? -1 : Math.hypot(p.x, p.z) * 39.3701;
+    }
+
+    /** Bearing to a tag in degrees, positive to the right. NaN when not visible. */
+    private double tagBearingDegrees(int tagId) {
+        Position p = seeTag(tagId);
+        return p == null ? Double.NaN : Math.toDegrees(Math.atan2(p.x, p.z));
+    }
+
+    /**
+     * One iteration of driving toward a tag. Returns true once it is within
+     * tolerance. Non-blocking on purpose — a TeleOp loop that stalls stops
+     * reading the gamepad, and the driver loses the robot.
+     *
+     * offsetInches shifts the target sideways: negative left, positive right.
+     */
+    private boolean stepTowardTag(int tagId, double targetInches, double offsetInches, double toleranceInches) {
+        Position p = seeTag(tagId);
+        if (p == null) {
+            stopDrive();
+            return false;
+        }
+        double xIn = p.x * 39.3701;
+        double zIn = p.z * 39.3701;
+
+        double rangeError = zIn - targetInches;
+        double lateralError = xIn - offsetInches;
+        double bearingError = Math.toDegrees(Math.atan2(xIn, zIn));
+
+        if (Math.abs(rangeError) <= toleranceInches
+                && Math.abs(lateralError) <= toleranceInches
+                && Math.abs(bearingError) <= TAG_ANGLE_TOLERANCE) {
+            stopDrive();
+            return true;
+        }
+
+        double forward = clamp(rangeError * TAG_DRIVE_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
+        double strafe = clamp(lateralError * TAG_STRAFE_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
+        double turn = clamp(bearingError * TAG_TURN_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
+        setDrivePowers(forward, strafe, turn);
+        return false;
+    }
+
+    private static double clamp(double v, double lo, double hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+` : ''}
+${(() => {
+  const dl = driveLayout();
+  if (dl.kind === 'mecanum') {
+    return `    /** Robot-oriented mixing, shared by the tag helpers. */
+    private void setDrivePowers(double forward, double strafe, double turn) {
+        double a = forward + strafe + turn;
+        double b = forward - strafe - turn;
+        double c = forward - strafe + turn;
+        double d = forward + strafe - turn;
+        double max = Math.max(Math.max(Math.abs(a), Math.abs(b)), Math.max(Math.abs(c), Math.abs(d)));
+        if (max > 1.0) { a /= max; b /= max; c /= max; d /= max; }
+        ${dl.fl}.setPower(a);
+        ${dl.fr}.setPower(b);
+        ${dl.bl}.setPower(c);
+        ${dl.br}.setPower(d);
+    }
+
+    private void stopDrive() {
+        ${dl.fl}.setPower(0);
+        ${dl.fr}.setPower(0);
+        ${dl.bl}.setPower(0);
+        ${dl.br}.setPower(0);
+    }`;
+  }
+  if (dl.kind === 'tank') {
+    return `    /** Tank mixing. The strafe argument is ignored — the wheels cannot use it. */
+    private void setDrivePowers(double forward, double strafe, double turn) {
+        double leftPower = forward + turn;
+        double rightPower = forward - turn;
+        double max = Math.max(Math.abs(leftPower), Math.abs(rightPower));
+        if (max > 1.0) { leftPower /= max; rightPower /= max; }
+${dl.left.map(n => `        ${n}.setPower(leftPower);`).join('\n')}
+${dl.right.map(n => `        ${n}.setPower(rightPower);`).join('\n')}
+    }
+
+    private void stopDrive() {
+${dl.left.concat(dl.right).map(n => `        ${n}.setPower(0);`).join('\n')}
+    }`;
+  }
+  return '';
+})()}
 }
 `;
   };
