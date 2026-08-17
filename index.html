@@ -368,19 +368,38 @@ const FTCRobotConfigurator = () => {
   };
 
   // Sensor Database
+  // Each bus has its own port range on a REV hub. Digital channels are allocated
+  // in pairs — one physical connector carries channels 0/1, the next 2/3, and so
+  // on — so two sensors on 0 and 1 share a cable while 0 and 2 need two.
+  const BUS_PORTS = {
+    i2c: [0, 1, 2, 3],
+    digital: [0, 1, 2, 3, 4, 5, 6, 7],
+    analog: [0, 1, 2, 3],
+    encoder: [0, 1, 2, 3]
+  };
+
   const sensorDatabase = {
     // REV Sensors
-    rev_color_v3: { name: 'REV Color Sensor V3', brand: 'REV', type: 'color', interface: 'i2c' },
-    rev_2m_distance: { name: 'REV 2M Distance Sensor', brand: 'REV', type: 'distance', interface: 'i2c' },
-    rev_touch: { name: 'REV Touch Sensor', brand: 'REV', type: 'touch', interface: 'digital' },
-    rev_magnetic_limit: { name: 'REV Magnetic Limit Switch', brand: 'REV', type: 'limit', interface: 'digital' },
-    rev_potentiometer: { name: 'REV Potentiometer', brand: 'REV', type: 'analog', interface: 'analog' },
+    rev_color_v3: { name: 'REV Color Sensor V3', brand: 'REV', type: 'color', interface: 'i2c',
+      javaType: 'ColorSensor', importPath: 'com.qualcomm.robotcore.hardware.ColorSensor' },
+    rev_2m_distance: { name: 'REV 2M Distance Sensor', brand: 'REV', type: 'distance', interface: 'i2c',
+      javaType: 'DistanceSensor', importPath: 'com.qualcomm.robotcore.hardware.DistanceSensor' },
+    rev_touch: { name: 'REV Touch Sensor', brand: 'REV', type: 'touch', interface: 'digital',
+      javaType: 'TouchSensor', importPath: 'com.qualcomm.robotcore.hardware.TouchSensor' },
+    rev_magnetic_limit: { name: 'REV Magnetic Limit Switch', brand: 'REV', type: 'limit', interface: 'digital',
+      javaType: 'TouchSensor', importPath: 'com.qualcomm.robotcore.hardware.TouchSensor' },
+    rev_potentiometer: { name: 'REV Potentiometer', brand: 'REV', type: 'analog', interface: 'analog',
+      javaType: 'AnalogInput', importPath: 'com.qualcomm.robotcore.hardware.AnalogInput' },
     // GoBilda/Modern Robotics
-    mr_color: { name: 'Modern Robotics Color Sensor', brand: 'MR', type: 'color', interface: 'i2c' },
-    mr_gyro: { name: 'Modern Robotics Gyro', brand: 'MR', type: 'gyro', interface: 'i2c' },
+    mr_color: { name: 'Modern Robotics Color Sensor', brand: 'MR', type: 'color', interface: 'i2c',
+      javaType: 'ColorSensor', importPath: 'com.qualcomm.robotcore.hardware.ColorSensor' },
+    mr_gyro: { name: 'Modern Robotics Gyro', brand: 'MR', type: 'gyro', interface: 'i2c',
+      javaType: 'GyroSensor', importPath: 'com.qualcomm.robotcore.hardware.GyroSensor' },
     // Generic
-    generic_limit: { name: 'Generic Limit Switch', brand: 'Generic', type: 'limit', interface: 'digital' },
-    generic_encoder: { name: 'Generic Encoder', brand: 'Generic', type: 'encoder', interface: 'encoder' }
+    generic_limit: { name: 'Generic Limit Switch', brand: 'Generic', type: 'limit', interface: 'digital',
+      javaType: 'DigitalChannel', importPath: 'com.qualcomm.robotcore.hardware.DigitalChannel' },
+    generic_encoder: { name: 'Generic Encoder', brand: 'Generic', type: 'encoder', interface: 'encoder',
+      javaType: 'DcMotorEx', importPath: 'com.qualcomm.robotcore.hardware.DcMotorEx' }
   };
 
   // Calculate offsets from center
@@ -1722,6 +1741,17 @@ import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+${(() => {
+  const need = new Set();
+  (sensors || []).forEach(sn => {
+    const info = sensorDatabase[sn.type];
+    if (info && info.importPath) need.add(info.importPath);
+  });
+  if ((sensors || []).some(sn => (sensorDatabase[sn.type] || {}).type === 'distance')) {
+    need.add('org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit');
+  }
+  return Array.from(need).sort().map(p => `import ${p};`).join('\n');
+})()}
 
 @TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
 public class ${javaClassName(robotName, 'TeleOp')} extends LinearOpMode {
@@ -1734,6 +1764,12 @@ ${auxMotors.map(m => `    private DcMotorEx ${javaVarName(m.name)};`).join('\n')
 
 ${servos.length > 0 ? `    // Servos
 ${servos.map(s => `    private Servo ${javaVarName(s.name)};`).join('\n')}` : ''}
+
+${sensors.length > 0 ? `    // Sensors
+${sensors.map(sn => {
+  const info = sensorDatabase[sn.type] || {};
+  return `    private ${info.javaType || 'DigitalChannel'} ${javaVarName(sn.name)};  // ${info.name || sn.type}, ${info.interface || '?'} port ${sn.port}`;
+}).join('\n')}` : ''}
 
     // IMU
     private IMU imu;
@@ -1790,7 +1826,21 @@ ${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx
         ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
-${servos.map(s => `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");`).join('\n')}` : ''}
+${servos.map(s => `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");${
+  (servoControls[s.name] && servoControls[s.name].position1 !== undefined)
+    ? `\n        ${javaVarName(s.name)}.setPosition(${servoControls[s.name].position1});  // starting position`
+    : ''}`).join('\n')}` : ''}
+
+${sensors.length > 0 ? `        // Initialize sensors
+${sensors.map(sn => {
+  const info = sensorDatabase[sn.type] || {};
+  const v = javaVarName(sn.name);
+  let code = `        ${v} = hardwareMap.get(${info.javaType || 'DigitalChannel'}.class, "${sn.name}");`;
+  if ((info.javaType || '') === 'DigitalChannel') {
+    code += `\n        ${v}.setMode(DigitalChannel.Mode.INPUT);`;
+  }
+  return code;
+}).join('\n')}` : ''}
 
         // Initialize IMU
         imu = hardwareMap.get(IMU.class, "imu");
@@ -2193,6 +2243,42 @@ ${telemetryDriveMotors ? (() => {
 })() : ''}
 ${telemetryAuxMotors && auxMotors.length > 0 ? `            telemetry.addData("Motors", "${auxMotors.map(m => `${m.name}:%.2f`).join(' | ')}", ${auxMotors.map(m => `${javaVarName(m.name)}.getPower()`).join(', ')});` : ''}
 ${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${javaVarName(s.name)}.getPosition()`).join(', ')});` : ''}
+${(() => {
+  const of = (t) => (sensors || []).filter(sn => (sensorDatabase[sn.type] || {}).type === t);
+  const out = [];
+  const dist = of('distance');
+  if (telemetryDistanceSensors && dist.length) {
+    out.push(`            telemetry.addData("Dist", "${dist.map(sn => `${sn.name}:%.1fin`).join(' ')}",
+                ${dist.map(sn => `${javaVarName(sn.name)}.getDistance(DistanceUnit.INCH)`).join(', ')});`);
+  }
+  const col = of('color');
+  if (telemetryColorSensors && col.length) {
+    col.forEach(sn => {
+      const v = javaVarName(sn.name);
+      out.push(`            telemetry.addData("${sn.name}", "R:%d G:%d B:%d", ${v}.red(), ${v}.green(), ${v}.blue());`);
+    });
+  }
+  // Touch and limit switches ride along with the distance checkbox — they are
+  // the same "what is the mechanism up against" question.
+  const touch = (sensors || []).filter(sn => ['touch','limit'].includes((sensorDatabase[sn.type] || {}).type));
+  if (telemetryDistanceSensors && touch.length) {
+    out.push(`            telemetry.addData("Switches", "${touch.map(sn => `${sn.name}:%s`).join(' ')}",
+                ${touch.map(sn => {
+                  const info = sensorDatabase[sn.type] || {};
+                  const v = javaVarName(sn.name);
+                  // TouchSensor reports pressed; a raw DigitalChannel reads inverted
+                  return info.javaType === 'TouchSensor'
+                    ? `${v}.isPressed() ? "PRESSED" : "open"`
+                    : `${v}.getState() ? "open" : "PRESSED"`;
+                }).join(', ')});`);
+  }
+  const analog = of('analog');
+  if (telemetryDistanceSensors && analog.length) {
+    out.push(`            telemetry.addData("Analog", "${analog.map(sn => `${sn.name}:%.2fV`).join(' ')}",
+                ${analog.map(sn => `${javaVarName(sn.name)}.getVoltage()`).join(', ')});`);
+  }
+  return out.join('\n');
+})()}
 ${telemetryBattery ? `            telemetry.addData("Batt", "%.1fV", hardwareMap.voltageSensor.iterator().next().getVoltage());` : ''}
 ${telemetryLoopTime ? `            telemetry.addData("Loop", "%dms", (int)(loopTimer.milliseconds()));
             loopTimer.reset();` : ''}
@@ -5115,6 +5201,14 @@ Make sure your code initializes the IMU with these orientations!
               </button>
             </div>
 
+            <div className="bg-gray-700 p-3 rounded-lg text-xs text-gray-400 leading-relaxed">
+              <strong className="text-gray-200">Ports depend on the bus.</strong> I2C has four buses (0–3) and the
+              Control Hub's built-in IMU sits on bus 0. Analog has ports 0–3. Digital has channels 0–7, allocated
+              in <strong className="text-gray-200">pairs</strong> — one physical connector carries channels 0 and 1,
+              the next carries 2 and 3, and so on. Two touch sensors on digital 0 and 1 share a single cable; on
+              0 and 2 they need two. The Driver Station names each channel separately either way.
+            </div>
+
             {sensors.length === 0 ? (
               <div className="text-gray-400 text-center py-8">
                 No sensors configured. Click "+ Add Sensor" to add one.
@@ -5173,7 +5267,7 @@ Make sure your code initializes the IMU with these orientations!
                             }}
                             className="w-16 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
                           >
-                            {[0,1,2,3].map(p => <option key={p} value={p}>{p}</option>)}
+                            {(BUS_PORTS[sensorDatabase[sensor.type]?.interface] || [0,1,2,3]).map(p => <option key={p} value={p}>{p}</option>)}
                           </select>
                         </div>
                       </div>
@@ -5183,8 +5277,14 @@ Make sure your code initializes the IMU with these orientations!
                           value={sensor.type}
                           onChange={(e) => {
                             const sensorInfo = sensorDatabase[e.target.value];
+                            const iface = sensorInfo?.interface || 'i2c';
+                            const allowed = BUS_PORTS[iface] || [0,1,2,3];
                             const updated = sensors.map(s =>
-                              s.id === sensor.id ? {...s, type: e.target.value, interface: sensorInfo?.interface || 'i2c'} : s
+                              s.id === sensor.id
+                                ? {...s, type: e.target.value, interface: iface,
+                                   // a digital sensor moved to I2C cannot stay on port 6
+                                   port: allowed.includes(s.port) ? s.port : allowed[0]}
+                                : s
                             );
                             setSensors(updated);
                           }}
@@ -5204,7 +5304,11 @@ Make sure your code initializes the IMU with these orientations!
                       </div>
                     </div>
                     <div className="mt-2 text-xs text-gray-400">
-                      Interface: {sensorDatabase[sensor.type]?.interface?.toUpperCase()}
+                      {sensorDatabase[sensor.type]?.interface?.toUpperCase()} port {sensor.port} on the {sensor.hub} hub
+                      {sensorDatabase[sensor.type]?.interface === 'digital' &&
+                        <> — shares a connector with digital {sensor.port % 2 === 0 ? sensor.port + 1 : sensor.port - 1}</>}
+                      {sensorDatabase[sensor.type]?.interface === 'i2c' && sensor.port === 0 && sensor.hub === 'control' &&
+                        <span className="text-yellow-300"> — bus 0 also carries the built-in IMU</span>}
                     </div>
                   </div>
                 ))}
