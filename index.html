@@ -475,6 +475,50 @@ const FTCRobotConfigurator = () => {
   };
   const stepIsRunnable = (st) => stepProblem(st) === null;
 
+  /**
+   * Which motor port each pod is read through, and which way its counts run.
+   *
+   * setDirection(REVERSE) also negates getCurrentPosition(), so a pod plugged
+   * into a reversed drive motor reads with the opposite sign to the calibration
+   * OpMode, which sets no directions at all. Effective reversal is the pod's own
+   * setting XOR its host motor's. Getting this wrong sends the robot away from
+   * its target at full power.
+   */
+  const podInfo = () => {
+    const samePort = (x, y) => {
+      if (!x || !y) return false;
+      const xh = typeof x === 'object' ? x.hub : 'control';
+      const xp = typeof x === 'object' ? x.port : x;
+      const yh = typeof y === 'object' ? y.hub : 'control';
+      const yp = typeof y === 'object' ? y.port : y;
+      return xh === yh && Number(xp) === Number(yp);
+    };
+    const hostFor = (p) => (motors || []).concat(auxMotors || [])
+      .find(mm => samePort({ hub: mm.hub || 'control', port: mm.port }, p));
+
+    const build = (isFirst) => {
+      const port = isFirst ? odo1Port : odo2Port;
+      const podRev = isFirst ? odo1Reversed : odo2Reversed;
+      const type = isFirst ? odo1Type : odo2Type;
+      const host = hostFor(port);
+      const hostRev = host ? !!host.reversed : false;
+      const spec = odoDatabase[type];
+      const measured = isFirst === (odo1Measures === 'forward_back')
+        ? calibration.parallelTPI : calibration.perpTPI;
+      return {
+        hardwareName: host ? host.name : null,
+        varName: host ? javaVarName(host.name) : null,
+        effectiveReversed: (!!podRev) !== hostRev,
+        hostReversed: hostRev,
+        podReversed: !!podRev,
+        ticksPerInch: (measured !== null && measured !== undefined && !Number.isNaN(measured))
+          ? measured : (spec ? Math.round(spec.ticksPerInch * 10) / 10 : 505.2)
+      };
+    };
+    const parallelIsOdo1 = odo1Measures === 'forward_back';
+    return { parallel: build(parallelIsOdo1), perpendicular: build(!parallelIsOdo1) };
+  };
+
   // Which drivetrain the configured motors actually describe. Emitting mecanum
   // mixing for a two-motor robot references frontLeft/frontRight, which do not
   // exist, so the file never compiles.
@@ -1796,6 +1840,24 @@ ${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values 
     private static final double TAG_ANGLE_TOLERANCE = 3.0;
     private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
 ` : ''}
+${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.perpendicular.varName; })()) ? (() => {
+  const p = podInfo();
+  return `    // Odometry pods, read through the motor ports they plug into.
+    // Effective reversal = pod setting XOR host motor direction, because
+    // setDirection(REVERSE) also negates getCurrentPosition().
+    //   parallel:      pod ${p.parallel.podReversed} XOR ${p.parallel.hardwareName} ${p.parallel.hostReversed ? 'REVERSE' : 'FORWARD'} = ${p.parallel.effectiveReversed}
+    //   perpendicular: pod ${p.perpendicular.podReversed} XOR ${p.perpendicular.hardwareName} ${p.perpendicular.hostReversed ? 'REVERSE' : 'FORWARD'} = ${p.perpendicular.effectiveReversed}
+    private static final double PARALLEL_TICKS_PER_INCH = ${p.parallel.ticksPerInch};
+    private static final double PERPENDICULAR_TICKS_PER_INCH = ${p.perpendicular.ticksPerInch};
+    private static final boolean PARALLEL_REVERSED = ${p.parallel.effectiveReversed};
+    private static final boolean PERPENDICULAR_REVERSED = ${p.perpendicular.effectiveReversed};
+    private int macroStartTicks = 0;
+    private static final double DRIVE_TOLERANCE_INCHES = 0.5;
+    private static final double DRIVE_SLOWDOWN_INCHES = 6.0;
+    private static final double DRIVE_MIN_POWER = 0.12;
+    private static final double DRIVE_STEP_TIMEOUT = 5.0;
+` ;
+})() : ''}
     // Field-oriented driving
     private double headingOffset = 0;
 ${driveLayout().kind === 'mecanum' ? `    /** Field-oriented until the driver toggles it off. */
@@ -1818,16 +1880,7 @@ ${macros.length > 0 ? `    // Macro states
     private int activeMacro = -1;  // -1 = no macro running
     private int macroStep = 0;
     private boolean macroStepStarted = false;
-${macros.map((m, i) => `    private boolean macro${i}ButtonPrev = false;`).join('\n')}
-
-${hasOdometry ? `    // Odometry constants (using configured pods)
-    private static final double TICKS_PER_INCH = ${(() => {
-      const pod = odoDatabase[odo1Type];
-      if (pod) {
-        return ((pod.cpr / (pod.wheelDiameter * Math.PI)) * 25.4).toFixed(1);
-      }
-      return '505.2';
-    })()};` : ''}` : ''}
+${macros.map((m, i) => `    private boolean macro${i}ButtonPrev = false;`).join('\n')}` : ''}
 
     @Override
     public void runOpMode() {
@@ -2051,34 +2104,66 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
                         break;
 `;
         break;
-      case 'drive_distance':
-        macroCode += `                        // Drive ${step.driveDirection} ${step.driveDistance} inches
+      case 'drive_distance': {
+        const pods = podInfo();
+        const lateral = ['left', 'right'].includes(step.driveDirection);
+        const dl = driveLayout();
+        const podReady = hasOdometry && pods.parallel.varName && pods.perpendicular.varName;
+
+        if (!podReady) {
+          macroCode += `                        // SKIPPED: Drive ${step.driveDirection} ${step.driveDistance} in
+                        // ${hasOdometry ? 'An odometry pod is on a port with no motor configured' : 'This robot has no odometry'},
+                        // so there is no way to measure how far it actually went.
+                        // Configure odometry in BotBuilder, or use Drive for Time instead.
+                        macroStep++;
+                        break;
+`;
+        } else if (lateral && dl.kind !== 'mecanum') {
+          macroCode += `                        // SKIPPED: Drive ${step.driveDirection} ${step.driveDistance} in
+                        // A tank drivetrain cannot strafe.
+                        macroStep++;
+                        break;
+`;
+        } else {
+          const sign = ['forward', 'left'].includes(step.driveDirection) ? 1 : -1;
+          const reader = lateral ? 'perpendicularTicks()' : 'parallelTicks()';
+          const tpi = lateral ? 'PERPENDICULAR_TICKS_PER_INCH' : 'PARALLEL_TICKS_PER_INCH';
+          const drive = lateral
+            ? `setDrivePowers(0, ${sign} * power, 0)`
+            : `setDrivePowers(${sign} * power, 0, 0)`;
+          macroCode += `                        // Drive ${step.driveDirection} ${step.driveDistance} in, measured by the ${lateral ? 'left/right' : 'forward/back'} pod
                         if (!macroStepStarted) {
-                            // TODO: Implement odometry-based driving
-                            // For now, use time-based approximation
+                            macroStartTicks = ${reader};
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
                         {
-                            double driveTime = ${step.driveDistance} / (${step.drivePower} * 24.0); // Approximate: 24 in/sec at full power
+                            double travelled = (${reader} - macroStartTicks) / ${tpi} * ${sign};
+                            double remaining = ${step.driveDistance} - travelled;
                             double power = ${step.drivePower};
-                            if (macroTimer.seconds() < driveTime) {
-                                ${step.driveDirection === 'forward' ? 
-                                  'frontLeft.setPower(power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(power);' :
-                                  step.driveDirection === 'backward' ?
-                                  'frontLeft.setPower(-power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(-power);' :
-                                  step.driveDirection === 'left' ?
-                                  'frontLeft.setPower(-power); frontRight.setPower(power); backLeft.setPower(power); backRight.setPower(-power);' :
-                                  'frontLeft.setPower(power); frontRight.setPower(-power); backLeft.setPower(-power); backRight.setPower(power);'}
-                            } else {
-                                frontLeft.setPower(0); frontRight.setPower(0); backLeft.setPower(0); backRight.setPower(0);
+                            // Ease off over the last few inches so it stops on the mark
+                            // instead of overshooting and having to come back.
+                            if (remaining < DRIVE_SLOWDOWN_INCHES) {
+                                power = Math.max(DRIVE_MIN_POWER, power * remaining / DRIVE_SLOWDOWN_INCHES);
+                            }
+                            if (remaining <= DRIVE_TOLERANCE_INCHES) {
+                                stopDrive();
                                 macroStep++;
                                 macroStepStarted = false;
+                            } else if (macroTimer.seconds() >= DRIVE_STEP_TIMEOUT) {
+                                // Stalled, slipping, or a pod came unplugged.
+                                stopDrive();
+                                macroStep++;
+                                macroStepStarted = false;
+                            } else {
+                                ${drive};
                             }
                         }
                         break;
 `;
+        }
         break;
+      }
       case 'turn_to_heading':
         macroCode += `                        // Turn to ${step.targetHeading} degrees
                         {
@@ -2447,6 +2532,21 @@ ${dl.left.concat(dl.right).map(n => `        ${n}.setPower(0);`).join('\n')}
   }
   return '';
 })()}
+${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.perpendicular.varName; })()) ? (() => {
+  const p = podInfo();
+  return `
+    /** Forward/back pod, in ticks. Positive is forward. */
+    private int parallelTicks() {
+        int t = ${p.parallel.varName}.getCurrentPosition();
+        return PARALLEL_REVERSED ? -t : t;
+    }
+
+    /** Left/right pod, in ticks. Positive is left. */
+    private int perpendicularTicks() {
+        int t = ${p.perpendicular.varName}.getCurrentPosition();
+        return PERPENDICULAR_REVERSED ? -t : t;
+    }`;
+})() : ''}
 }
 `;
   };
