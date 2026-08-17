@@ -183,6 +183,12 @@ const FTCRobotConfigurator = () => {
   const [driveStrafe, setDriveStrafe] = React.useState('left_stick_x');
   const [driveRotate, setDriveRotate] = React.useState('right_stick_x');
   const [resetHeadingButton, setResetHeadingButton] = React.useState('options');
+  // Field-oriented driving is mecanum-only — a differential drivetrain cannot
+  // execute the lateral component the transform produces. The toggle flips
+  // between modes without touching heading; Options re-zeroes heading and
+  // forces field-oriented back on, which is the recovery when the IMU drifts.
+  const [robotOrientedButton, setRobotOrientedButton] = React.useState('none');
+
   const [slowModeButton, setSlowModeButton] = React.useState('none');
   const [slowModeSpeed, setSlowModeSpeed] = React.useState(0.4);
 
@@ -469,6 +475,8 @@ const FTCRobotConfigurator = () => {
   };
 
   // Validation function
+  const driverPad = () => (gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2');
+
   const getValidationWarnings = () => {
     const warnings = [];
     
@@ -532,6 +540,31 @@ const FTCRobotConfigurator = () => {
       }
     })();
 
+    // Buttons assigned to more than one thing. The generated code reads them in
+    // every place they appear, so one press fires all of them.
+    (() => {
+      const claims = [];
+      const label = (v) => v;
+      if (resetHeadingButton && resetHeadingButton !== 'none') claims.push([resetHeadingButton, 'reset heading', driverPad()]);
+      if (slowModeButton && slowModeButton !== 'none') claims.push([slowModeButton, 'slow mode', driverPad()]);
+      if (robotOrientedButton && robotOrientedButton !== 'none') claims.push([robotOrientedButton, 'robot-oriented toggle', driverPad()]);
+      (macros || []).forEach(m => {
+        if (m.triggerType === 'button' || m.triggerType === 'combo')
+          claims.push([m.triggerButton, `macro "${m.name}"`, m.triggerController]);
+      });
+      Object.keys(servoControls || {}).forEach(name => {
+        const c = servoControls[name];
+        if (c && c.button) claims.push([c.button, `servo "${name}"`, c.controller]);
+      });
+      const seen = {};
+      claims.forEach(([btn, who, pad]) => {
+        const key = (pad || 'gamepad1') + ':' + btn;
+        if (seen[key]) {
+          warnings.push({ type: 'warning', message: `${pad || 'gamepad1'} ${label(btn)} is used by both ${seen[key]} and ${who} — one press triggers both.` });
+        } else seen[key] = who;
+      });
+    })();
+
     // Check odometry pod port conflicts
     if (odo1Port.hub === odo2Port.hub && odo1Port.port === odo2Port.port) {
       warnings.push({ type: 'error', message: `Odometry pods both on ${odo1Port.hub} hub port ${odo1Port.port}` });
@@ -577,7 +610,7 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, motorControls, servoControls,
+      slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
@@ -653,6 +686,7 @@ const FTCRobotConfigurator = () => {
     setResetHeadingButton(config.resetHeadingButton || 'options');
     setSlowModeButton(config.slowModeButton || 'none');
     setSlowModeSpeed(config.slowModeSpeed || 0.4);
+    setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setServoControls(config.servoControls || {});
     setTelemetryHeading(config.telemetryHeading !== undefined ? config.telemetryHeading : true);
@@ -696,7 +730,7 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, motorControls, servoControls,
+      slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
@@ -1710,6 +1744,9 @@ ${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toU
 
     // Field-oriented driving
     private double headingOffset = 0;
+${driveLayout().kind === 'mecanum' ? `    /** Field-oriented until the driver toggles it off. */
+    private boolean fieldOriented = true;${robotOrientedButton !== 'none' ? `
+    private boolean orientationButtonPrev = false;` : ''}` : ''}
 
     // Timers
     private ElapsedTime loopTimer = new ElapsedTime();
@@ -2051,10 +2088,19 @@ ${macros.length > 0 ? `            if (activeMacro == -1) {` : ''}
             double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
             double rotate = ${getAxisCode(driveRotate, driverGamepad)};
 
-            // Reset heading
+${driveLayout().kind === 'mecanum' ? `            // Re-zero heading and return to field-oriented. Whatever direction the
+            // robot is physically facing becomes the new "downfield", so point it
+            // that way before pressing.
             if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
                 headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+                fieldOriented = true;
+            }` : `            // Tank drive is always robot-oriented, so there is no heading to reset.`}
+${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `
+            // Toggle between field- and robot-oriented. Does not touch heading.
+            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev) {
+                fieldOriented = !fieldOriented;
             }
+            orientationButtonPrev = ${getButtonCode(robotOrientedButton, driverGamepad)};` : ''}
 
 ${slowModeButton !== 'none' ? `            // Slow mode
             double speedMultiplier = ${getButtonCode(slowModeButton, driverGamepad)} ? ${slowModeSpeed} : 1.0;
@@ -2065,9 +2111,9 @@ ${slowModeButton !== 'none' ? `            // Slow mode
 ${(() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
-    return `            // Field-oriented transform
-            double rotatedForward = forward * Math.cos(heading) + strafe * Math.sin(heading);
-            double rotatedStrafe = -forward * Math.sin(heading) + strafe * Math.cos(heading);
+    return `            // Field-oriented transform, skipped when the driver has toggled it off.
+            double rotatedForward = fieldOriented ? forward * Math.cos(heading) + strafe * Math.sin(heading) : forward;
+            double rotatedStrafe = fieldOriented ? -forward * Math.sin(heading) + strafe * Math.cos(heading) : strafe;
 
             // Mecanum drive math
             double ${dl.fl}Power = rotatedForward + rotatedStrafe + rotate;
@@ -2129,6 +2175,7 @@ ${macros.length > 0 ? `            if (activeMacro != -1) {
                 telemetry.addData("MACRO", "${macros.map((m, i) => `" + (activeMacro == ${i} ? "${m.name} Step " + macroStep : "") + "`).join('')}");
             }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
+${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}
 ${telemetryAprilTag ? `            // AprilTag telemetry would go here (requires Limelight integration)
             telemetry.addData("Tag", "N/A");` : ''}
 ${telemetryDriveMotors ? (() => {
@@ -3698,7 +3745,38 @@ Make sure your code initializes the IMU with these orientations!
                     />
                   </div>
                 )}
+                {driveLayout().kind === 'mecanum' && (
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1">Robot-Oriented Toggle</label>
+                    <select
+                      value={robotOrientedButton}
+                      onChange={(e) => setRobotOrientedButton(e.target.value)}
+                      className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                    >
+                      {buttonOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                    </select>
+                    <span className="text-xs text-gray-400">Press to switch between field- and robot-oriented</span>
+                  </div>
+                )}
               </div>
+
+              {driveLayout().kind === 'mecanum' ? (
+                <div className="mt-3 p-2 rounded border border-gray-600 bg-gray-800 text-xs text-gray-400 leading-relaxed">
+                  Driving starts <strong className="text-gray-200">field-oriented</strong>: the left stick moves the
+                  robot relative to the field, whichever way it happens to be facing.
+                  {robotOrientedButton !== 'none' && <> {buttonOptions.find(b => b.value === robotOrientedButton)?.label} toggles
+                  to <strong className="text-gray-200">robot-oriented</strong>, where the stick moves it relative to its own
+                  nose — usually easier for lining up against something.</>}
+                  {' '}{buttonOptions.find(b => b.value === resetHeadingButton)?.label} re-zeroes the heading and returns to
+                  field-oriented. Point the robot downfield first, or that direction becomes the new "forward".
+                </div>
+              ) : (
+                <div className="mt-3 p-2 rounded border border-yellow-700 bg-yellow-900 bg-opacity-20 text-xs text-yellow-300 leading-relaxed">
+                  Tank drive is always robot-oriented. A differential drivetrain cannot strafe, so a
+                  field-oriented transform would ask for sideways motion the wheels cannot produce.
+                  The heading reset and orientation toggle do not apply.
+                </div>
+              )}
             </div>
 
             {/* Auxiliary Motor Controls */}
