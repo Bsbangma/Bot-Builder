@@ -19,15 +19,52 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
+// Java identifiers cannot contain spaces or punctuation and cannot start with a
+// digit. Robot and macro names are free text, so everything that becomes an
+// identifier goes through here first. The hardware NAME strings sent to
+// hardwareMap are left untouched — those must match the Driver Station config
+// exactly, spaces and all.
+const JAVA_RESERVED = new Set(['abstract','assert','boolean','break','byte','case','catch','char',
+  'class','const','continue','default','do','double','else','enum','extends','final','finally',
+  'float','for','goto','if','implements','import','instanceof','int','interface','long','native',
+  'new','package','private','protected','public','return','short','static','strictfp','super',
+  'switch','synchronized','this','throw','throws','transient','try','void','volatile','while',
+  'true','false','null','var','record','yield']);
+
+const javaClassName = (name, suffix) => {
+  let base = String(name || '').replace(/[^A-Za-z0-9]+/g, ' ').trim();
+  base = base ? base.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('') : '';
+  if (!base) base = 'Robot';
+  if (/^[0-9]/.test(base)) base = 'Robot' + base;
+  return base + (suffix || '');
+};
+
+// For a motor or servo used as a Java variable. Keeps the name recognisable
+// while guaranteeing it compiles.
+const javaVarName = (name) => {
+  let base = String(name || '').replace(/[^A-Za-z0-9]+/g, ' ').trim();
+  if (!base) return 'device';
+  const parts = base.split(/\s+/);
+  let out = parts.map((w, i) => i === 0
+    ? w.charAt(0).toLowerCase() + w.slice(1)
+    : w.charAt(0).toUpperCase() + w.slice(1)).join('');
+  if (/^[0-9]/.test(out)) out = 'm' + out.charAt(0).toUpperCase() + out.slice(1);
+  if (JAVA_RESERVED.has(out)) out = out + 'Motor';
+  return out;
+};
+
 // "Score High" -> scoreHigh. PathPilot emits direct calls rather than string
 // dispatch, so renaming a macro breaks the build loudly instead of silently
 // no-opping at a competition.
 const javaMethodName = (name) => {
   const parts = String(name || '').replace(/[^A-Za-z0-9 ]/g, ' ').trim().split(/\s+/);
   if (!parts.length || !parts[0]) return 'macro';
-  return parts.map((w, i) => i === 0
+  let out = parts.map((w, i) => i === 0
     ? w.charAt(0).toLowerCase() + w.slice(1)
     : w.charAt(0).toUpperCase() + w.slice(1)).join('');
+  if (/^[0-9]/.test(out)) out = 'macro' + out.charAt(0).toUpperCase() + out.slice(1);
+  if (JAVA_RESERVED.has(out)) out = out + 'Macro';
+  return out;
 };
 
 const PP_LOGO = "data:image/png;base64,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";
@@ -424,6 +461,25 @@ const FTCRobotConfigurator = () => {
       warnings.push({ type: 'warning', message: 'No drive motors configured' });
     }
     
+    // Macro steps pointing at hardware that no longer exists
+    (macros || []).forEach(m => {
+      (m.steps || []).forEach((st, i) => {
+        const problem = stepProblem(st);
+        if (problem) warnings.push({ type: 'error', message: `Macro "${m.name}" step ${i + 1}: ${problem}` });
+      });
+    });
+
+    // Drivetrain the motors actually describe
+    (() => {
+      const dl = driveLayout();
+      if (dl.kind === 'unknown' && (motors || []).length > 0) {
+        warnings.push({ type: 'error', message: 'Motor names do not describe a drivetrain. Mecanum needs frontLeft/frontRight/backLeft/backRight; tank needs names containing "left" and "right".' });
+      }
+      if (dl.kind === 'tank') {
+        warnings.push({ type: 'warning', message: `Tank drive detected (${dl.left.length} left, ${dl.right.length} right). Strafe and field-oriented driving are disabled — a differential drivetrain cannot move sideways.` });
+      }
+    })();
+
     // Check odometry pod port conflicts
     if (odo1Port.hub === odo2Port.hub && odo1Port.port === odo2Port.port) {
       warnings.push({ type: 'error', message: `Odometry pods both on ${odo1Port.hub} hub port ${odo1Port.port}` });
@@ -630,43 +686,43 @@ const FTCRobotConfigurator = () => {
       body.push('if (!opModeIsActive()) return;');
       switch (st.type) {
         case 'motor_position':
-          usedMotors.add(st.motorName);
-          body.push(`${st.motorName}.setTargetPosition(${st.motorPosition || 0});`);
-          body.push(`${st.motorName}.setMode(DcMotor.RunMode.RUN_TO_POSITION);`);
-          body.push(`${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 0.8});`);
+          usedMotors.add(javaVarName(st.motorName));
+          body.push(`${javaVarName(st.motorName)}.setTargetPosition(${st.motorPosition || 0});`);
+          body.push(`${javaVarName(st.motorName)}.setMode(DcMotor.RunMode.RUN_TO_POSITION);`);
+          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 0.8});`);
           body.push('macroTimer.reset();');
           body.push(`while (opModeIsActive() && ${st.motorName}.isBusy() && macroTimer.seconds() < 4.0) idle();`);
-          body.push(`${st.motorName}.setPower(0);`);
-          body.push(`${st.motorName}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+          body.push(`${javaVarName(st.motorName)}.setPower(0);`);
+          body.push(`${javaVarName(st.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
           estSeconds += 1.2;
           break;
         case 'motor_time':
-          usedMotors.add(st.motorName);
-          body.push(`${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+          usedMotors.add(javaVarName(st.motorName));
+          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
           body.push(`sleep(${Math.round((st.motorDuration !== undefined ? st.motorDuration : 1.0) * 1000)});`);
-          body.push(`${st.motorName}.setPower(0);`);
+          body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           estSeconds += (st.motorDuration !== undefined ? Number(st.motorDuration) : 1.0);
           break;
         case 'motor_until_velocity':
-          usedMotors.add(st.motorName);
-          body.push(`${st.motorName}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+          usedMotors.add(javaVarName(st.motorName));
+          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
           body.push('macroTimer.reset();');
-          body.push(`while (opModeIsActive() && Math.abs(${st.motorName}.getVelocity()) < ${st.targetVelocity || 0}`);
+          body.push(`while (opModeIsActive() && Math.abs(${javaVarName(st.motorName)}.getVelocity()) < ${st.targetVelocity || 0}`);
           body.push(`       && macroTimer.seconds() < ${st.velocityTimeout || 3.0}) idle();`);
           estSeconds += Math.min(Number(st.velocityTimeout || 3.0), 1.5);
           break;
         case 'wait_velocity': {
-          usedMotors.add(st.motorName);
+          usedMotors.add(javaVarName(st.motorName));
           const cmp = st.velocityCondition === 'below' ? '>' : '<';
           body.push('macroTimer.reset();');
-          body.push(`while (opModeIsActive() && Math.abs(${st.motorName}.getVelocity()) ${cmp} ${st.targetVelocity || 0}`);
+          body.push(`while (opModeIsActive() && Math.abs(${javaVarName(st.motorName)}.getVelocity()) ${cmp} ${st.targetVelocity || 0}`);
           body.push(`       && macroTimer.seconds() < ${st.velocityTimeout || 3.0}) idle();`);
           estSeconds += Math.min(Number(st.velocityTimeout || 3.0), 1.0);
           break;
         }
         case 'servo_position':
-          usedServos.add(st.servoName);
-          body.push(`${st.servoName}.setPosition(${st.servoPosition !== undefined ? st.servoPosition : 0.5});`);
+          usedServos.add(javaVarName(st.servoName));
+          body.push(`${javaVarName(st.servoName)}.setPosition(${st.servoPosition !== undefined ? st.servoPosition : 0.5});`);
           body.push('sleep((long)(SERVO_SETTLE * 1000));');
           estSeconds += 0.30;
           break;
@@ -937,7 +993,7 @@ const FTCRobotConfigurator = () => {
     const perYOff = (calibration.perpYOffset !== null && !Number.isNaN(calibration.perpYOffset))
       ? calibration.perpYOffset : 0;
 
-    const className = robotName.replace(/[^A-Za-z0-9]/g, '') + 'OdometryCalibration';
+    const className = javaClassName(robotName, 'OdometryCalibration');
     const L = [];
     const P = (...xs) => xs.forEach(x => L.push(x));
 
@@ -1418,6 +1474,57 @@ ${sensors.map(s => {
 `;
   };
 
+  // A macro can outlive the hardware it was written against — rename a motor,
+  // delete it, or start a new robot from an old config, and the step still
+  // points at something that no longer exists. Emitting it produces a file that
+  // cannot compile, so the step is commented out and reported instead.
+  // addStep() gives every step every field, so a step's motorName is meaningful
+  // only for the types that actually drive a motor. Checking it unconditionally
+  // blames the wrong hardware — an LED step would report a missing motor.
+  const MOTOR_STEPS = ['motor_position', 'motor_time', 'motor_until_velocity', 'wait_velocity'];
+  const SERVO_STEPS = ['servo_position'];
+  const VISION_STEPS = ['drive_to_tag'];
+
+  const stepProblem = (st) => {
+    if (MOTOR_STEPS.includes(st.type)) {
+      if (!st.motorName) return 'no motor selected';
+      if (!(auxMotors || []).some(m => m.name === st.motorName))
+        return `motor "${st.motorName}" is not configured on this robot`;
+    }
+    if (SERVO_STEPS.includes(st.type)) {
+      if (!st.servoName) return 'no servo selected';
+      if (!(servos || []).some(sv => sv.name === st.servoName))
+        return `servo "${st.servoName}" is not configured on this robot`;
+    }
+    if (st.type === 'led_pattern') {
+      if (!hasBlinkin) return 'this robot has no Blinkin';
+      if (!(blinkinPatterns || []).some(p => p.name === st.ledPattern))
+        return `LED pattern "${st.ledPattern}" is not defined`;
+    }
+    if (VISION_STEPS.includes(st.type) && !hasLimelight)
+      return 'this robot has no Limelight';
+    return null;
+  };
+  const stepIsRunnable = (st) => stepProblem(st) === null;
+
+  // Which drivetrain the configured motors actually describe. Emitting mecanum
+  // mixing for a two-motor robot references frontLeft/frontRight, which do not
+  // exist, so the file never compiles.
+  const driveLayout = () => {
+    const byName = {};
+    (motors || []).forEach(m => { byName[m.name.toLowerCase()] = javaVarName(m.name); });
+    const four = ['frontleft', 'frontright', 'backleft', 'backright'];
+    if (four.every(n => byName[n])) {
+      return { kind: 'mecanum', fl: byName.frontleft, fr: byName.frontright, bl: byName.backleft, br: byName.backright };
+    }
+    const left = (motors || []).filter(m => /left/i.test(m.name));
+    const right = (motors || []).filter(m => /right/i.test(m.name));
+    if (left.length && right.length && left.length + right.length === (motors || []).length) {
+      return { kind: 'tank', left: left.map(m => javaVarName(m.name)), right: right.map(m => javaVarName(m.name)) };
+    }
+    return { kind: 'unknown' };
+  };
+
   // Generate Complete TeleOp Code
   const generateCompleteTeleOp = () => {
     const driverGamepad = gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2';
@@ -1455,7 +1562,8 @@ ${sensors.map(s => {
     };
 
     // Generate motor control code
-    const generateMotorControlCode = (motor) => {
+    const generateMotorControlCode = (motorArg) => {
+      const motor = { ...motorArg, name: javaVarName(motorArg.name), label: motorArg.name };
       const ctrl = motorControls[motor.name] || {
         controller: operatorGamepad,
         control: 'trigger_pair',
@@ -1527,7 +1635,8 @@ ${sensors.map(s => {
     };
 
     // Generate servo control code
-    const generateServoControlCode = (servo) => {
+    const generateServoControlCode = (servoArg) => {
+      const servo = { ...servoArg, name: javaVarName(servoArg.name), label: servoArg.name };
       const ctrl = servoControls[servo.name] || {
         controller: operatorGamepad,
         button: 'a',
@@ -1569,16 +1678,16 @@ import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 
 @TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
-public class ${robotName.replace(/\s+/g, '')}TeleOp extends LinearOpMode {
+public class ${javaClassName(robotName, 'TeleOp')} extends LinearOpMode {
 
     // Drive Motors
-${motors.map(m => `    private DcMotor ${m.name};`).join('\n')}
+${motors.map(m => `    private DcMotor ${javaVarName(m.name)};`).join('\n')}
 
 ${auxMotors.length > 0 ? `    // Auxiliary Motors (DcMotorEx for velocity)
-${auxMotors.map(m => `    private DcMotorEx ${m.name};`).join('\n')}` : ''}
+${auxMotors.map(m => `    private DcMotorEx ${javaVarName(m.name)};`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `    // Servos
-${servos.map(s => `    private Servo ${s.name};`).join('\n')}` : ''}
+${servos.map(s => `    private Servo ${javaVarName(s.name)};`).join('\n')}` : ''}
 
     // IMU
     private IMU imu;
@@ -1595,12 +1704,12 @@ ${blinkinPatterns.map(p => `    private static final double BLINKIN_${p.name.toU
     private ElapsedTime macroTimer = new ElapsedTime();
 
 ${toggleMotors.length > 0 ? `    // Motor toggle states
-${toggleMotors.map(m => `    private boolean ${m.name}Running = false;
-    private boolean ${m.name}ButtonPrev = false;`).join('\n')}` : ''}
+${toggleMotors.map(m => `    private boolean ${javaVarName(m.name)}Running = false;
+    private boolean ${javaVarName(m.name)}ButtonPrev = false;`).join('\n')}` : ''}
 
 ${toggleServos.length > 0 ? `    // Servo toggle states
-${toggleServos.map(s => `    private boolean ${s.name}Open = false;
-    private boolean ${s.name}ButtonPrev = false;`).join('\n')}` : ''}
+${toggleServos.map(s => `    private boolean ${javaVarName(s.name)}Open = false;
+    private boolean ${javaVarName(s.name)}ButtonPrev = false;`).join('\n')}` : ''}
 
 ${macros.length > 0 ? `    // Macro states
     private int activeMacro = -1;  // -1 = no macro running
@@ -1608,28 +1717,28 @@ ${macros.length > 0 ? `    // Macro states
     private boolean macroStepStarted = false;
 ${macros.map((m, i) => `    private boolean macro${i}ButtonPrev = false;`).join('\n')}
 
-    // Odometry constants (using configured pods)
+${hasOdometry ? `    // Odometry constants (using configured pods)
     private static final double TICKS_PER_INCH = ${(() => {
       const pod = odoDatabase[odo1Type];
       if (pod) {
         return ((pod.cpr / (pod.wheelDiameter * Math.PI)) * 25.4).toFixed(1);
       }
       return '505.2';
-    })()};` : ''}
+    })()};` : ''}` : ''}
 
     @Override
     public void runOpMode() {
         // Initialize drive motors
-${motors.map(m => `        ${m.name} = hardwareMap.get(DcMotor.class, "${m.name}");
-        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}
+${motors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${m.name}");
+        ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`).join('\n')}
 
 ${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx for velocity)
-${auxMotors.map(m => `        ${m.name} = hardwareMap.get(DcMotorEx.class, "${m.name}");
-        ${m.name}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
-        ${m.name}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
+${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${m.name}");
+        ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
+        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
-${servos.map(s => `        ${s.name} = hardwareMap.get(Servo.class, "${s.name}");`).join('\n')}` : ''}
+${servos.map(s => `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");`).join('\n')}` : ''}
 
         // Initialize IMU
         imu = hardwareMap.get(IMU.class, "imu");
@@ -1656,7 +1765,7 @@ ${macros.length > 0 ? `            // === MACRO CANCEL (START button) ===
                     macroStep = 0;
                     macroStepStarted = false;
                     // Stop all motors when canceling
-                    ${auxMotors.map(m => `${m.name}.setPower(0);`).join('\n                    ')}
+                    ${auxMotors.length ? auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ') : '// no auxiliary motors to stop'}
                 }
             }
 
@@ -1685,9 +1794,9 @@ ${macros.map((macro, i) => {
       triggerCondition = `${holdBtn} && ${pressBtn}`;
     }
   } else if (macro.triggerType === 'velocity_above') {
-    triggerCondition = `((DcMotorEx)${macro.triggerMotor || auxMotors[0]?.name || 'motor'}).getVelocity() >= ${macro.triggerVelocity || 1000}`;
+    triggerCondition = `((DcMotorEx)${javaVarName(macro.triggerMotor || (auxMotors[0] && auxMotors[0].name) || 'motor')}).getVelocity() >= ${macro.triggerVelocity || 1000}`;
   } else if (macro.triggerType === 'velocity_below') {
-    triggerCondition = `((DcMotorEx)${macro.triggerMotor || auxMotors[0]?.name || 'motor'}).getVelocity() <= ${macro.triggerVelocity || 1000}`;
+    triggerCondition = `((DcMotorEx)${javaVarName(macro.triggerMotor || (auxMotors[0] && auxMotors[0].name) || 'motor')}).getVelocity() <= ${macro.triggerVelocity || 1000}`;
   } else if (macro.triggerType === 'tag_visible') {
     triggerCondition = `false /* AprilTag ${macro.triggerTagId || 21} visible - requires Limelight */`;
   }
@@ -1716,14 +1825,24 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
   getButtonCode(macro.triggerButton, macro.triggerController)}) {
                     activeMacro = -1;
                     macroStep = 0;
-                    ${auxMotors.map(m => `${m.name}.setPower(0);`).join('\n                    ')}
+                    ${auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ')}
                 } else ` : '                '}switch (macroStep) {
 `;
 
   macro.steps.forEach((step, stepIdx) => {
     macroCode += `                    case ${stepIdx}: // ${step.type}
 `;
-    
+
+    // Skip anything that references hardware this robot does not have.
+    if (!stepIsRunnable(step)) {
+      macroCode += `                        // SKIPPED: ${stepProblem(step)}.
+                        // Fix the macro in BotBuilder, or add the hardware.
+                        macroStep++;
+                        break;
+`;
+      return;
+    }
+
     switch (step.type) {
       case 'wait':
         macroCode += `                        if (!macroStepStarted) {
@@ -1738,7 +1857,7 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
 `;
         break;
       case 'servo_position':
-        macroCode += `                        ${step.servoName}.setPosition(${step.servoPosition});
+        macroCode += `                        ${javaVarName(step.servoName)}.setPosition(${step.servoPosition});
                         macroStep++;
                         break;
 `;
@@ -1752,12 +1871,12 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
         break;
       case 'motor_time':
         macroCode += `                        if (!macroStepStarted) {
-                            ${step.motorName}.setPower(${step.motorPower});
+                            ${javaVarName(step.motorName)}.setPower(${step.motorPower});
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
                         if (macroTimer.seconds() >= ${step.motorDuration}) {
-                            ${step.motorName}.setPower(0);
+                            ${javaVarName(step.motorName)}.setPower(0);
                             macroStep++;
                             macroStepStarted = false;
                         }
@@ -1766,13 +1885,13 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
         break;
       case 'motor_position':
         macroCode += `                        if (!macroStepStarted) {
-                            ${step.motorName}.setTargetPosition(${step.motorPosition});
-                            ${step.motorName}.setMode(DcMotor.RunMode.RUN_TO_POSITION);
-                            ${step.motorName}.setPower(${step.motorPower});
+                            ${javaVarName(step.motorName)}.setTargetPosition(${step.motorPosition});
+                            ${javaVarName(step.motorName)}.setMode(DcMotor.RunMode.RUN_TO_POSITION);
+                            ${javaVarName(step.motorName)}.setPower(${step.motorPower});
                             macroStepStarted = true;
                         }
-                        if (!${step.motorName}.isBusy()) {
-                            ${step.motorName}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                        if (!${javaVarName(step.motorName)}.isBusy()) {
+                            ${javaVarName(step.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
                             macroStep++;
                             macroStepStarted = false;
                         }
@@ -1781,11 +1900,11 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
         break;
       case 'motor_until_velocity':
         macroCode += `                        if (!macroStepStarted) {
-                            ${step.motorName}.setPower(${step.motorPower});
+                            ${javaVarName(step.motorName)}.setPower(${step.motorPower});
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
-                        if (Math.abs(${step.motorName}.getVelocity()) >= ${step.targetVelocity} || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                        if (Math.abs(${javaVarName(step.motorName)}.getVelocity()) >= ${step.targetVelocity} || macroTimer.seconds() >= ${step.velocityTimeout}) {
                             // Keep motor running, move to next step
                             macroStep++;
                             macroStepStarted = false;
@@ -1799,8 +1918,8 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
                             macroStepStarted = true;
                         }
                         if (${step.velocityCondition === 'above' ? 
-                          `Math.abs(${step.motorName}.getVelocity()) >= ${step.targetVelocity}` : 
-                          `Math.abs(${step.motorName}.getVelocity()) <= ${step.targetVelocity}`} || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                          `Math.abs(${javaVarName(step.motorName)}.getVelocity()) >= ${step.targetVelocity}` : 
+                          `Math.abs(${javaVarName(step.motorName)}.getVelocity()) <= ${step.targetVelocity}`} || macroTimer.seconds() >= ${step.velocityTimeout}) {
                             macroStep++;
                             macroStepStarted = false;
                         }
@@ -1907,6 +2026,10 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
   return macroCode;
 }).join('\n')}
 ` : ''}
+            // Heading is read every loop, not just while driving, because the
+            // telemetry below needs it even when a macro has the drivetrain.
+            double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
+
             // === DRIVE CONTROLS (disabled during macro) ===
 ${macros.length > 0 ? `            if (activeMacro == -1) {` : ''}
             double forward = -${getAxisCode(driveForwardBack, driverGamepad)};
@@ -1924,33 +2047,61 @@ ${slowModeButton !== 'none' ? `            // Slow mode
             strafe *= speedMultiplier;
             rotate *= speedMultiplier;` : ''}
 
-            // Field-oriented transform
-            double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
+${(() => {
+  const dl = driveLayout();
+  if (dl.kind === 'mecanum') {
+    return `            // Field-oriented transform
             double rotatedForward = forward * Math.cos(heading) + strafe * Math.sin(heading);
             double rotatedStrafe = -forward * Math.sin(heading) + strafe * Math.cos(heading);
 
             // Mecanum drive math
-            double frontLeftPower = rotatedForward + rotatedStrafe + rotate;
-            double frontRightPower = rotatedForward - rotatedStrafe - rotate;
-            double backLeftPower = rotatedForward - rotatedStrafe + rotate;
-            double backRightPower = rotatedForward + rotatedStrafe - rotate;
+            double ${dl.fl}Power = rotatedForward + rotatedStrafe + rotate;
+            double ${dl.fr}Power = rotatedForward - rotatedStrafe - rotate;
+            double ${dl.bl}Power = rotatedForward - rotatedStrafe + rotate;
+            double ${dl.br}Power = rotatedForward + rotatedStrafe - rotate;
 
             // Normalize powers
-            double maxPower = Math.max(Math.max(Math.abs(frontLeftPower), Math.abs(frontRightPower)),
-                                       Math.max(Math.abs(backLeftPower), Math.abs(backRightPower)));
+            double maxPower = Math.max(Math.max(Math.abs(${dl.fl}Power), Math.abs(${dl.fr}Power)),
+                                       Math.max(Math.abs(${dl.bl}Power), Math.abs(${dl.br}Power)));
             if (maxPower > 1.0) {
-                frontLeftPower /= maxPower;
-                frontRightPower /= maxPower;
-                backLeftPower /= maxPower;
-                backRightPower /= maxPower;
+                ${dl.fl}Power /= maxPower;
+                ${dl.fr}Power /= maxPower;
+                ${dl.bl}Power /= maxPower;
+                ${dl.br}Power /= maxPower;
             }
 
             // Set drive motor powers
-            frontLeft.setPower(frontLeftPower);
-            frontRight.setPower(frontRightPower);
-            backLeft.setPower(backLeftPower);
-            backRight.setPower(backRightPower);
+            ${dl.fl}.setPower(${dl.fl}Power);
+            ${dl.fr}.setPower(${dl.fr}Power);
+            ${dl.bl}.setPower(${dl.bl}Power);
+            ${dl.br}.setPower(${dl.br}Power);
+`;
+  }
+  if (dl.kind === 'tank') {
+    return `            // Tank drive. A differential drivetrain cannot strafe, so the
+            // strafe axis is unused and driving stays robot-oriented — a
+            // field-oriented transform would command sideways motion that the
+            // wheels cannot produce.
+            double leftPower = forward + rotate;
+            double rightPower = forward - rotate;
 
+            double maxPower = Math.max(Math.abs(leftPower), Math.abs(rightPower));
+            if (maxPower > 1.0) {
+                leftPower /= maxPower;
+                rightPower /= maxPower;
+            }
+
+${dl.left.map(n => `            ${n}.setPower(leftPower);`).join('\n')}
+${dl.right.map(n => `            ${n}.setPower(rightPower);`).join('\n')}
+`;
+  }
+  return `            // NO DRIVE CODE GENERATED
+            // The configured motors do not describe a drivetrain BotBuilder
+            // recognises. Mecanum needs frontLeft, frontRight, backLeft and
+            // backRight; tank needs motors whose names contain "left" and
+            // "right". Rename them, or drive these motors from the Controls tab.
+`;
+})()}
 ${auxMotors.length > 0 ? `            // === AUXILIARY MOTOR CONTROLS ===
 ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 
@@ -1965,10 +2116,21 @@ ${macros.length > 0 ? `            if (activeMacro != -1) {
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
 ${telemetryAprilTag ? `            // AprilTag telemetry would go here (requires Limelight integration)
             telemetry.addData("Tag", "N/A");` : ''}
-${telemetryDriveMotors ? `            telemetry.addData("Drive", "FL:%.2f FR:%.2f BL:%.2f BR:%.2f", 
-                frontLeft.getPower(), frontRight.getPower(), backLeft.getPower(), backRight.getPower());` : ''}
-${telemetryAuxMotors && auxMotors.length > 0 ? `            telemetry.addData("Motors", "${auxMotors.map(m => `${m.name}:%.2f`).join(' | ')}", ${auxMotors.map(m => `${m.name}.getPower()`).join(', ')});` : ''}
-${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${s.name}.getPosition()`).join(', ')});` : ''}
+${telemetryDriveMotors ? (() => {
+  const dl = driveLayout();
+  if (dl.kind === 'mecanum') {
+    return `            telemetry.addData("Drive", "FL:%.2f FR:%.2f BL:%.2f BR:%.2f",
+                ${dl.fl}.getPower(), ${dl.fr}.getPower(), ${dl.bl}.getPower(), ${dl.br}.getPower());`;
+  }
+  if (dl.kind === 'tank') {
+    const all = dl.left.concat(dl.right);
+    return `            telemetry.addData("Drive", "${all.map(n => n + ':%.2f').join(' ')}",
+                ${all.map(n => n + '.getPower()').join(', ')});`;
+  }
+  return '';
+})() : ''}
+${telemetryAuxMotors && auxMotors.length > 0 ? `            telemetry.addData("Motors", "${auxMotors.map(m => `${m.name}:%.2f`).join(' | ')}", ${auxMotors.map(m => `${javaVarName(m.name)}.getPower()`).join(', ')});` : ''}
+${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${javaVarName(s.name)}.getPosition()`).join(', ')});` : ''}
 ${telemetryBattery ? `            telemetry.addData("Batt", "%.1fV", hardwareMap.voltageSensor.iterator().next().getVoltage());` : ''}
 ${telemetryLoopTime ? `            telemetry.addData("Loop", "%dms", (int)(loopTimer.milliseconds()));
             loopTimer.reset();` : ''}
@@ -4772,7 +4934,7 @@ Make sure your code initializes the IMU with these orientations!
               <div className="bg-green-900 border border-green-600 p-3 rounded-lg text-sm">
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
                 <ol className="text-green-200 space-y-1 list-decimal list-inside">
-                  <li>Paste into OnBot Java as <code className="bg-green-800 px-1 rounded">{robotName.replace(/[^A-Za-z0-9]/g, '') + 'OdometryCalibration'}.java</code> and Build</li>
+                  <li>Paste into OnBot Java as <code className="bg-green-800 px-1 rounded">{javaClassName(robotName, 'OdometryCalibration')}.java</code> and Build</li>
                   <li>Run it, then start on <strong>Test 0 (port scan)</strong> and push the robot — confirm the moving ports are the two named as your pods</li>
                   <li>Test 1: push forward exactly 48" (two tiles), press B</li>
                   <li>Test 2: push left exactly 48", press B</li>
@@ -4787,7 +4949,7 @@ Make sure your code initializes the IMU with these orientations!
                 <h4 className="text-blue-400 font-semibold mb-2">📝 Next Steps:</h4>
                 <ol className="text-blue-200 space-y-1 list-decimal list-inside">
                   <li>Copy the code above</li>
-                  <li>In OnBot Java, create a new file: <code className="bg-blue-800 px-1 rounded">{robotName.replace(/\s+/g, '')}TeleOp.java</code></li>
+                  <li>In OnBot Java, create a new file: <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'TeleOp')}.java</code></li>
                   <li>Paste and save</li>
                   <li>Configure your Driver Station (see DS tab)</li>
                   <li>Test and drive!</li>
