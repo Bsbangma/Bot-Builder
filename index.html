@@ -416,6 +416,53 @@ const FTCRobotConfigurator = () => {
   const odo1Specs = odoDatabase[odo1Type];
   const odo2Specs = odoDatabase[odo2Type];
 
+  // addStep() gives every step every field, so a step's motorName is meaningful
+  // only for the types that actually drive a motor. Checking it unconditionally
+  // blames the wrong hardware — an LED step would report a missing motor.
+  const MOTOR_STEPS = ['motor_position', 'motor_time', 'motor_until_velocity', 'wait_velocity'];
+  const SERVO_STEPS = ['servo_position'];
+  const VISION_STEPS = ['drive_to_tag'];
+
+  const stepProblem = (st) => {
+    if (MOTOR_STEPS.includes(st.type)) {
+      if (!st.motorName) return 'no motor selected';
+      if (!(auxMotors || []).some(m => m.name === st.motorName))
+        return `motor "${st.motorName}" is not configured on this robot`;
+    }
+    if (SERVO_STEPS.includes(st.type)) {
+      if (!st.servoName) return 'no servo selected';
+      if (!(servos || []).some(sv => sv.name === st.servoName))
+        return `servo "${st.servoName}" is not configured on this robot`;
+    }
+    if (st.type === 'led_pattern') {
+      if (!hasBlinkin) return 'this robot has no Blinkin';
+      if (!(blinkinPatterns || []).some(p => p.name === st.ledPattern))
+        return `LED pattern "${st.ledPattern}" is not defined`;
+    }
+    if (VISION_STEPS.includes(st.type) && !hasLimelight)
+      return 'this robot has no Limelight';
+    return null;
+  };
+  const stepIsRunnable = (st) => stepProblem(st) === null;
+
+  // Which drivetrain the configured motors actually describe. Emitting mecanum
+  // mixing for a two-motor robot references frontLeft/frontRight, which do not
+  // exist, so the file never compiles.
+  const driveLayout = () => {
+    const byName = {};
+    (motors || []).forEach(m => { byName[m.name.toLowerCase()] = javaVarName(m.name); });
+    const four = ['frontleft', 'frontright', 'backleft', 'backright'];
+    if (four.every(n => byName[n])) {
+      return { kind: 'mecanum', fl: byName.frontleft, fr: byName.frontright, bl: byName.backleft, br: byName.backright };
+    }
+    const left = (motors || []).filter(m => /left/i.test(m.name));
+    const right = (motors || []).filter(m => /right/i.test(m.name));
+    if (left.length && right.length && left.length + right.length === (motors || []).length) {
+      return { kind: 'tank', left: left.map(m => javaVarName(m.name)), right: right.map(m => javaVarName(m.name)) };
+    }
+    return { kind: 'unknown' };
+  };
+
   // Validation function
   const getValidationWarnings = () => {
     const warnings = [];
@@ -1478,53 +1525,6 @@ ${sensors.map(s => {
   // delete it, or start a new robot from an old config, and the step still
   // points at something that no longer exists. Emitting it produces a file that
   // cannot compile, so the step is commented out and reported instead.
-  // addStep() gives every step every field, so a step's motorName is meaningful
-  // only for the types that actually drive a motor. Checking it unconditionally
-  // blames the wrong hardware — an LED step would report a missing motor.
-  const MOTOR_STEPS = ['motor_position', 'motor_time', 'motor_until_velocity', 'wait_velocity'];
-  const SERVO_STEPS = ['servo_position'];
-  const VISION_STEPS = ['drive_to_tag'];
-
-  const stepProblem = (st) => {
-    if (MOTOR_STEPS.includes(st.type)) {
-      if (!st.motorName) return 'no motor selected';
-      if (!(auxMotors || []).some(m => m.name === st.motorName))
-        return `motor "${st.motorName}" is not configured on this robot`;
-    }
-    if (SERVO_STEPS.includes(st.type)) {
-      if (!st.servoName) return 'no servo selected';
-      if (!(servos || []).some(sv => sv.name === st.servoName))
-        return `servo "${st.servoName}" is not configured on this robot`;
-    }
-    if (st.type === 'led_pattern') {
-      if (!hasBlinkin) return 'this robot has no Blinkin';
-      if (!(blinkinPatterns || []).some(p => p.name === st.ledPattern))
-        return `LED pattern "${st.ledPattern}" is not defined`;
-    }
-    if (VISION_STEPS.includes(st.type) && !hasLimelight)
-      return 'this robot has no Limelight';
-    return null;
-  };
-  const stepIsRunnable = (st) => stepProblem(st) === null;
-
-  // Which drivetrain the configured motors actually describe. Emitting mecanum
-  // mixing for a two-motor robot references frontLeft/frontRight, which do not
-  // exist, so the file never compiles.
-  const driveLayout = () => {
-    const byName = {};
-    (motors || []).forEach(m => { byName[m.name.toLowerCase()] = javaVarName(m.name); });
-    const four = ['frontleft', 'frontright', 'backleft', 'backright'];
-    if (four.every(n => byName[n])) {
-      return { kind: 'mecanum', fl: byName.frontleft, fr: byName.frontright, bl: byName.backleft, br: byName.backright };
-    }
-    const left = (motors || []).filter(m => /left/i.test(m.name));
-    const right = (motors || []).filter(m => /right/i.test(m.name));
-    if (left.length && right.length && left.length + right.length === (motors || []).length) {
-      return { kind: 'tank', left: left.map(m => javaVarName(m.name)), right: right.map(m => javaVarName(m.name)) };
-    }
-    return { kind: 'unknown' };
-  };
-
   // Generate Complete TeleOp Code
   const generateCompleteTeleOp = () => {
     const driverGamepad = gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2';
