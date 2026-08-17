@@ -45,6 +45,11 @@ const FTCRobotConfigurator = () => {
   const [wheelType, setWheelType] = React.useState('mecanum');
   const [wheelSize, setWheelSize] = React.useState(104);
 
+  // Subsystem presence. Without these, generated code initializes hardware that
+  // isn't on the robot and throws at init rather than failing gracefully.
+  const [hasOdometry, setHasOdometry] = React.useState(true);
+  const [hasLimelight, setHasLimelight] = React.useState(true);
+
   // Odometry Pod 1
   const [odo1Type, setOdo1Type] = React.useState('gobilda_4bar');
   const [odo1FromBack, setOdo1FromBack] = React.useState(9);
@@ -455,6 +460,7 @@ const FTCRobotConfigurator = () => {
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
       odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      hasOdometry, hasLimelight,
       calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
@@ -504,6 +510,8 @@ const FTCRobotConfigurator = () => {
     setOdo2Reversed(config.odo2Reversed || false);
     setOdo2Measures(config.odo2Measures || 'left_right');
     setOdo2Port(config.odo2Port || { hub: 'control', port: 1 });
+    setHasOdometry(config.hasOdometry !== undefined ? config.hasOdometry : true);
+    setHasLimelight(config.hasLimelight !== undefined ? config.hasLimelight : true);
     setCalParallelTPI(config.calParallelTPI !== undefined ? config.calParallelTPI : '');
     setCalPerpTPI(config.calPerpTPI !== undefined ? config.calPerpTPI : '');
     setCalParallelXOffset(config.calParallelXOffset !== undefined ? config.calParallelXOffset : '');
@@ -570,6 +578,7 @@ const FTCRobotConfigurator = () => {
       wheelBrand, wheelType, wheelSize,
       odo1Type, odo1FromBack, odo1FromRight, odo1Reversed, odo1Measures, odo1Port,
       odo2Type, odo2FromBack, odo2FromRight, odo2Reversed, odo2Measures, odo2Port,
+      hasOdometry, hasLimelight,
       calParallelTPI, calPerpTPI, calParallelXOffset, calPerpYOffset, calDate,
       imuLocation, imuLogoDirection, imuUsbDirection,
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
@@ -823,7 +832,10 @@ const FTCRobotConfigurator = () => {
         profileWarnings.push('Macro "' + mm.name + '" is flagged for PathPilot but has no steps; it generates an empty method.');
     });
 
-    if (calibration.status !== 'calibrated') {
+    if (!hasOdometry) {
+      profileWarnings.push('This robot has no odometry. PathPilot cannot plan autonomous paths without it — driveTo has no way to know where the robot is.');
+    }
+    if (hasOdometry && calibration.status !== 'calibrated') {
       profileWarnings.push(calibration.status === 'partial'
         ? `Odometry is only partially calibrated (${calibration.have} of 4 values measured); the rest are theoretical.`
         : 'Odometry is uncalibrated. Run the Odometry Calibration OpMode and enter its results in the Odometry tab.');
@@ -849,18 +861,18 @@ const FTCRobotConfigurator = () => {
         wheelDiameterIn: wheelSize ? Math.round((Number(wheelSize) / 25.4) * 1000) / 1000 : null,
         measured: { maxVelocityInPerSec: null, maxAccelInPerSec2: null, maxTurnRateDegPerSec: null }
       },
-      odometry: {
+      odometry: hasOdometry ? {
         type: 'twoPodImu',
         parallel: par,
         perpendicular: per,
         calibration: { status: calibration.status, date: calibration.date }
-      },
+      } : { type: 'none' },
       imu: {
         source: imuLocation || 'control_hub',
         logoDirection: imuLogoDirection,
         usbDirection: imuUsbDirection
       },
-      limelight: limelightVersion ? {
+      limelight: (hasLimelight && limelightVersion) ? {
         present: true, model: limelightVersion,
         xOffsetIn: (Number(robotWidth) / 2) - Number(limelightFromRight || 0),
         yOffsetIn: Number(limelightFromBack || 0) - (Number(robotLength) / 2),
@@ -889,6 +901,11 @@ const FTCRobotConfigurator = () => {
   // read off the screen instead of deduce.
   // ------------------------------------------------------------------
   const generateOdometryCalibration = () => {
+    if (!hasOdometry) {
+      return '// This robot is configured without odometry pods.\n' +
+             '// Tick "This robot has odometry pods" in the Odometry tab to generate\n' +
+             '// the calibration OpMode.';
+    }
     const parallelIsOdo1 = odo1Measures === 'forward_back';
     const samePort = (x, y) => {
       if (!x || !y) return false;
@@ -2228,7 +2245,26 @@ Make sure your code initializes the IMU with these orientations!
         return (
           <div className="space-y-6">
             <h3 className="text-xl font-bold text-green-400">Odometry Pods</h3>
-            
+
+            <div className="bg-gray-700 p-3 rounded-lg">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasOdometry}
+                  onChange={(e) => setHasOdometry(e.target.checked)}
+                  className="form-checkbox h-5 w-5 text-green-500 rounded"
+                />
+                <span className="text-gray-300">This robot has odometry pods</span>
+              </label>
+              {!hasOdometry && (
+                <p className="text-xs text-yellow-300 mt-2">
+                  Odometry is off. Generated code will not reference pods — and PathPilot cannot
+                  plan autonomous paths, because <code>driveTo</code> has no way to know where the robot is.
+                </p>
+              )}
+            </div>
+
+            {hasOdometry && (<>
             {/* Pod 1 */}
             <div className="bg-gray-700 p-4 rounded-lg">
               <h4 className="text-lg font-semibold text-blue-400 mb-3">Pod 1</h4>
@@ -2520,6 +2556,7 @@ Make sure your code initializes the IMU with these orientations!
                 </p>
               )}
             </div>
+            </>)}
           </div>
         );
 
@@ -2581,6 +2618,25 @@ Make sure your code initializes the IMU with these orientations!
         return (
           <div className="space-y-6">
             <h3 className="text-xl font-bold text-green-400">Limelight Configuration</h3>
+
+            <div className="bg-gray-700 p-3 rounded-lg">
+              <label className="flex items-center space-x-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasLimelight}
+                  onChange={(e) => setHasLimelight(e.target.checked)}
+                  className="form-checkbox h-5 w-5 text-green-500 rounded"
+                />
+                <span className="text-gray-300">This robot has a Limelight</span>
+              </label>
+              {!hasLimelight && (
+                <p className="text-xs text-yellow-300 mt-2">
+                  Limelight is off. AprilTag actions will not appear in PathPilot.
+                </p>
+              )}
+            </div>
+
+            {hasLimelight && (
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-300 mb-1">Limelight Version</label>
@@ -2641,6 +2697,7 @@ Make sure your code initializes the IMU with these orientations!
                 />
               </div>
             </div>
+            )}
           </div>
         );
 
