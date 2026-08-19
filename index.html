@@ -2281,8 +2281,14 @@ ${(() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
     return `            // Field-oriented transform, skipped when the driver has toggled it off.
-            double rotatedForward = fieldOriented ? forward * Math.cos(heading) + strafe * Math.sin(heading) : forward;
-            double rotatedStrafe = fieldOriented ? -forward * Math.sin(heading) + strafe * Math.cos(heading) : strafe;
+            //
+            // IMU yaw is counter-clockwise positive, so the field-forward direction
+            // sits at -heading in the robot's frame and the stick vector rotates by
+            // +heading. Both sine terms were inverted here until 2026-08-18, which
+            // only showed up at +/-90 degrees: at 0 and 180 sin(h) is 0, so the
+            // wrong terms vanished and those headings drove correctly.
+            double rotatedForward = fieldOriented ? forward * Math.cos(heading) - strafe * Math.sin(heading) : forward;
+            double rotatedStrafe = fieldOriented ? forward * Math.sin(heading) + strafe * Math.cos(heading) : strafe;
 
             // Mecanum drive math
             double ${dl.fl}Power = rotatedForward + rotatedStrafe + rotate;
