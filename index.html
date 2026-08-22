@@ -314,7 +314,27 @@ const FTCRobotConfigurator = () => {
     spark_hd_hex_40: { name: 'Spark Mini + HD Hex 40:1 (150 RPM)', brand: 'Spark Mini', rpm: 150, ticksPerRev: 1120, stallTorque: 3.2 },
     spark_hd_hex_20: { name: 'Spark Mini + HD Hex 20:1 (300 RPM)', brand: 'Spark Mini', rpm: 300, ticksPerRev: 560, stallTorque: 1.6 },
     spark_core_hex: { name: 'Spark Mini + Core Hex (125 RPM)', brand: 'Spark Mini', rpm: 125, ticksPerRev: 288, stallTorque: 3.2 },
-    spark_generic_no_encoder: { name: 'Spark Mini + DC Motor (no encoder)', brand: 'Spark Mini', rpm: 0, ticksPerRev: 0, stallTorque: 0 }
+    spark_generic_no_encoder: { name: 'Spark Mini + DC Motor (no encoder)', brand: 'Spark Mini', rpm: 0, ticksPerRev: 0, stallTorque: 0 },
+    // A gearing the list does not carry. rpm and ticksPerRev come from the
+    // motor's own customRatio, computed against a bare 6000 rpm / 28 tick motor.
+    custom: { name: 'Custom gear ratio', brand: 'Custom', rpm: 0, ticksPerRev: 0, stallTorque: 0, isCustom: true }
+  };
+
+  /** A bare FTC-legal motor before gearing: 6000 rpm, 28 counts per revolution. */
+  const BARE_MOTOR_RPM = 6000;
+  const BARE_MOTOR_CPR = 28;
+
+  /** Specs for a motor, resolving a custom gear ratio when one is set. */
+  const motorSpecs = (m) => {
+    const base = motorDatabase[m.type] || {};
+    if (!base.isCustom) return base;
+    const ratio = Number(m.customRatio) || 1;
+    return {
+      ...base,
+      name: `Custom ${ratio}:1`,
+      rpm: Math.round(BARE_MOTOR_RPM / ratio),
+      ticksPerRev: Math.round(BARE_MOTOR_CPR * ratio * 10) / 10
+    };
   };
 
   // Servo Database
@@ -612,6 +632,34 @@ const FTCRobotConfigurator = () => {
       }
     })();
 
+    // A control bound to gamepad2 on a one-controller robot never responds.
+    if (numControllers === 1) {
+      const stray = [];
+      Object.keys(motorControls || {}).forEach(n => {
+        if (motorControls[n] && motorControls[n].controller === 'gamepad2') stray.push(`motor "${n}"`);
+      });
+      Object.keys(servoControls || {}).forEach(n => {
+        if (servoControls[n] && servoControls[n].controller === 'gamepad2') stray.push(`servo "${n}"`);
+      });
+      (macros || []).forEach(m => {
+        if (m.triggerController === 'gamepad2') stray.push(`macro "${m.name}"`);
+      });
+      stray.forEach(what => warnings.push({ type: 'error',
+        message: `${what} is bound to gamepad 2, but this robot is configured for one controller. It will never respond. Change it to gamepad 1, or set two controllers in the Controls tab.` }));
+    }
+
+    // A latching motor that also has a direct control will be stomped every loop.
+    (macros || []).forEach(m => {
+      (m.steps || []).forEach(st => {
+        if (st.type !== 'motor_on' || !st.motorName) return;
+        const c = motorControls[st.motorName];
+        if (c && c.control && c.control !== 'none') {
+          warnings.push({ type: 'error',
+            message: `Macro "${m.name}" latches "${st.motorName}" on, but that motor also has a direct control in the Controls tab. The control writes to it every loop and will immediately turn it back off. Set its control to "Not directly controlled".` });
+        }
+      });
+    });
+
     // A device left on the expansion hub after it is switched off is invisible
     // in the Ports tab and will not resolve on the robot.
     if (!hasExpansionHub) {
@@ -869,6 +917,15 @@ const FTCRobotConfigurator = () => {
           body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           body.push(`${javaVarName(st.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
           estSeconds += 1.2;
+          break;
+        case 'motor_on':
+          usedMotors.add(javaVarName(st.motorName));
+          body.push(`// latching: keeps running after this macro returns`);
+          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+          break;
+        case 'motor_off':
+          usedMotors.add(javaVarName(st.motorName));
+          body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           break;
         case 'motor_time':
           usedMotors.add(javaVarName(st.motorName));
@@ -1842,8 +1899,13 @@ ${sensors.map(s => {
   // cannot compile, so the step is commented out and reported instead.
   // Generate Complete TeleOp Code
   const generateCompleteTeleOp = () => {
-    const driverGamepad = gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2';
-    const operatorGamepad = gamepad1Role === 'operator' ? 'gamepad1' : 'gamepad2';
+    // With a single controller everything is on gamepad1. Falling back to
+    // gamepad2 there binds mechanisms to a pad that does not exist, and the
+    // controls silently never respond.
+    const driverGamepad = (numControllers === 1 || gamepad1Role === 'driver') ? 'gamepad1' : 'gamepad2';
+    const operatorGamepad = numControllers === 1
+      ? 'gamepad1'
+      : (gamepad1Role === 'operator' ? 'gamepad1' : 'gamepad2');
 
     // Helper to convert control name to Java code
     const getAxisCode = (axis, gamepad) => {
@@ -1871,17 +1933,26 @@ ${sensors.map(s => {
         'options': `${gamepad}.options`,
         'start': `${gamepad}.start`,
         'left_stick_button': `${gamepad}.left_stick_button`,
-        'right_stick_button': `${gamepad}.right_stick_button`
+        'right_stick_button': `${gamepad}.right_stick_button`,
+        'left_trigger': `(${gamepad}.left_trigger > 0.5)`,
+        'right_trigger': `(${gamepad}.right_trigger > 0.5)`
       };
       return map[button] || `${gamepad}.a`;
     };
 
     // Generate motor control code
+    // A motor a macro latches on must not also be written every loop, or the
+    // control immediately overwrites the latched power.
+    const latchedByMacro = (name) => (macros || []).some(m =>
+      (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
+
     const generateMotorControlCode = (motorArg) => {
       const motor = { ...motorArg, name: javaVarName(motorArg.name), label: motorArg.name };
-      const ctrl = motorControls[motor.name] || {
+      // Keyed by the configured name, not the sanitized Java variable — a motor
+      // called "1st intake" becomes m1stIntake and would never match.
+      const ctrl = motorControls[motorArg.name] || {
         controller: operatorGamepad,
-        control: 'trigger_pair',
+        control: latchedByMacro(motorArg.name) ? 'none' : 'trigger_pair',
         behavior: 'hold',
         power: 1.0
       };
@@ -1889,13 +1960,20 @@ ${sensors.map(s => {
       const power = ctrl.power;
 
       let code = '';
+      if (ctrl.control === 'none') {
+        return `        // ${motor.label} is driven by macros only — no direct control,
+        // so a latching Turn Motor On is not overwritten each loop.`;
+      }
       if (ctrl.behavior === 'toggle') {
+        const toggleBtn = ctrl.control === 'single'
+          ? (ctrl.singleButton || 'dpad_up')
+          : (ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a');
         code = `        // ${motor.name} - Toggle control
-        if (${getButtonCode(ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a', gp)} && !${motor.name}ButtonPrev) {
+        if (${getButtonCode(toggleBtn, gp)} && !${motor.name}ButtonPrev) {
             ${motor.name}Running = !${motor.name}Running;
         }
-        ${motor.name}ButtonPrev = ${getButtonCode(ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a', gp)};
-        ${motor.name}.setPower(${motor.name}Running ? ${power} : 0);`;
+        ${motor.name}ButtonPrev = ${getButtonCode(toggleBtn, gp)};
+        ${motor.name}.setPower(${motor.name}Running ? ${ctrl.singleDirection === 'reverse' ? '-' : ''}${power} : 0);`;
       } else {
         // Hold behavior
         switch (ctrl.control) {
@@ -1941,6 +2019,13 @@ ${sensors.map(s => {
         else if (${gp}.x) ${motor.name}.setPower(-${power});
         else ${motor.name}.setPower(0);`;
             break;
+          case 'single': {
+            const btn = getButtonCode(ctrl.singleButton || 'dpad_up', gp);
+            const sign = (ctrl.singleDirection === 'reverse') ? '-' : '';
+            code = `        // ${motor.name} - single button, ${ctrl.singleDirection || 'forward'} only
+        ${motor.name}.setPower(${btn} ? ${sign}${power} : 0);`;
+            break;
+          }
           default:
             code = `        // ${motor.name} - Default trigger control
         ${motor.name}.setPower((${gp}.right_trigger - ${gp}.left_trigger) * ${power});`;
@@ -2143,7 +2228,7 @@ ${macros.length > 0 ? `        telemetry.addLine("Macros: ${macros.length} confi
 
         while (opModeIsActive()) {
 ${macros.length > 0 ? `            // === MACRO CANCEL (START button) ===
-            if (gamepad1.start || gamepad2.start) {
+            if (gamepad1.start${numControllers === 1 ? '' : ' || gamepad2.start'}) {
                 if (activeMacro != -1) {
                     activeMacro = -1;
                     macroStep = 0;
@@ -2249,6 +2334,21 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
       case 'led_pattern':
         const patternConst = `BLINKIN_${(step.ledPattern || 'DEFAULT').toUpperCase().replace(/\s+/g, '_')}`;
         macroCode += `                        blinkin.setPosition(${patternConst});
+                        macroStep++;
+                        break;
+`;
+        break;
+      case 'motor_on':
+        macroCode += `                        // Latching: set power and move on. The motor keeps running
+                        // after this macro finishes, until a Turn Motor Off step,
+                        // another macro, or the START cancel.
+                        ${step.motorName}.setPower(${step.motorPower});
+                        macroStep++;
+                        break;
+`;
+        break;
+      case 'motor_off':
+        macroCode += `                        ${step.motorName}.setPower(0);
                         macroStep++;
                         break;
 `;
@@ -3588,8 +3688,31 @@ Make sure your code initializes the IMU with these orientations!
                             <option key={key} value={key}>{motor.name}</option>
                           ))}
                         </optgroup>
+                        <optgroup label="Other">
+                          <option value="custom">Custom gear ratio</option>
+                        </optgroup>
                       </select>
                     </div>
+                      {motorDatabase[motor.type]?.isCustom && (
+                        <div className="col-span-2">
+                          <label className="block text-xs text-gray-400 mb-1">Gear ratio (x:1)</label>
+                          <input
+                            type="number" step="0.1" min="0.1"
+                            value={motor.customRatio !== undefined ? motor.customRatio : 1}
+                            onChange={(e) => {
+                              const updated = motors.map(m =>
+                                m.id === motor.id ? {...m, customRatio: parseFloat(e.target.value) || 1} : m
+                              );
+                              setMotors(updated);
+                            }}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            placeholder="75"
+                          />
+                          <span className="text-xs text-gray-400">
+                            e.g. 75 for a 75:1 gearbox. Used for the RPM and ticks/rev shown below.
+                          </span>
+                        </div>
+                      )}
                     <div className="col-span-2">
                       <label className="flex items-center space-x-2 cursor-pointer">
                         <input
@@ -3608,7 +3731,7 @@ Make sure your code initializes the IMU with these orientations!
                     </div>
                   </div>
                   <div className="mt-2 text-xs text-gray-400">
-                    {motorDatabase[motor.type]?.rpm} RPM | {motorDatabase[motor.type]?.ticksPerRev} ticks/rev
+                    {motorSpecs(motor).rpm} RPM | {motorSpecs(motor).ticksPerRev} ticks/rev
                   </div>
                 </div>
               ))}
@@ -3769,8 +3892,31 @@ Make sure your code initializes the IMU with these orientations!
                               <option key={key} value={key}>{motor.name}</option>
                             ))}
                           </optgroup>
+                          <optgroup label="Other">
+                            <option value="custom">Custom gear ratio</option>
+                          </optgroup>
                         </select>
                       </div>
+                      {motorDatabase[motor.type]?.isCustom && (
+                        <div className="col-span-2">
+                          <label className="block text-xs text-gray-400 mb-1">Gear ratio (x:1)</label>
+                          <input
+                            type="number" step="0.1" min="0.1"
+                            value={motor.customRatio !== undefined ? motor.customRatio : 1}
+                            onChange={(e) => {
+                              const updated = auxMotors.map(m =>
+                                m.id === motor.id ? {...m, customRatio: parseFloat(e.target.value) || 1} : m
+                              );
+                              setAuxMotors(updated);
+                            }}
+                            className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                            placeholder="75"
+                          />
+                          <span className="text-xs text-gray-400">
+                            e.g. 75 for a 75:1 gearbox. Used for the RPM and ticks/rev shown below.
+                          </span>
+                        </div>
+                      )}
                       <div>
                         <label className="flex items-center space-x-2 cursor-pointer mt-5">
                           <input
@@ -3805,7 +3951,7 @@ Make sure your code initializes the IMU with these orientations!
                       </div>
                     </div>
                     <div className="mt-2 text-xs text-gray-400">
-                      {motorDatabase[motor.type]?.rpm} RPM | {motorDatabase[motor.type]?.ticksPerRev} ticks/rev
+                      {motorSpecs(motor).rpm} RPM | {motorSpecs(motor).ticksPerRev} ticks/rev
                     </div>
                   </div>
                 ))}
@@ -3993,6 +4139,7 @@ Make sure your code initializes the IMU with these orientations!
               </div>
 
               {/* Encoder Ports for Odometry */}
+              {hasOdometry && (
               <div>
                 <h5 className="text-sm font-semibold text-gray-300 mb-2">Encoder Ports (Odometry)</h5>
                 <div className="grid grid-cols-2 gap-3">
@@ -4021,6 +4168,7 @@ Make sure your code initializes the IMU with these orientations!
                   Note: Encoder ports share with motor ports. The odometry pods plug into the encoder pins of the motor ports.
                 </p>
               </div>
+              )}
             </div>
 
             {/* Expansion Hub */}
@@ -4144,15 +4292,34 @@ Make sure your code initializes the IMU with these orientations!
           { value: 'left_stick_y', label: 'Left Stick Y Axis' },
           { value: 'right_stick_y', label: 'Right Stick Y Axis' },
           { value: 'ab_buttons', label: 'A Forward / B Reverse' },
-          { value: 'xy_buttons', label: 'Y Forward / X Reverse' }
+          { value: 'xy_buttons', label: 'Y Forward / X Reverse' },
+          // One button, one direction. The opposite direction is simply not
+          // bound — useful where a mechanism only ever runs one way.
+          { value: 'single', label: 'Single button (one direction)' },
+          // A latching motor_on step is pointless if a direct control writes to
+          // the same motor every loop — the macro sets the power and the control
+          // immediately overwrites it.
+          { value: 'none', label: 'Not directly controlled (macros only)' }
         ];
 
+        // A motor a macro latches on should not also be written every loop by a
+        // direct control, so it defaults to macro-only.
+        const latchedByMacro = (name) => (macros || []).some(m =>
+          (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
+
         const getDefaultMotorControl = (motorName) => {
+          if (!motorControls[motorName] && latchedByMacro(motorName)) {
+            return { controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
+                     control: 'none', behavior: 'hold', power: 1.0,
+                     singleButton: 'dpad_up', singleDirection: 'forward' };
+          }
           return motorControls[motorName] || { 
             controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
             control: 'trigger_pair',
             behavior: 'hold',
-            power: 1.0
+            power: 1.0,
+            singleButton: 'dpad_up',
+            singleDirection: 'forward'
           };
         };
 
@@ -4396,6 +4563,35 @@ Make sure your code initializes the IMU with these orientations!
                               className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
                             />
                           </div>
+                          {ctrl.control === 'single' && (
+                            <>
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Button</label>
+                                <select
+                                  value={ctrl.singleButton || 'dpad_up'}
+                                  onChange={(e) => updateMotorControl(motor.name, 'singleButton', e.target.value)}
+                                  className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                                >
+                                  {buttonOptions.filter(b => b.value !== 'none').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-xs text-gray-400 mb-1">Direction</label>
+                                <select
+                                  value={ctrl.singleDirection || 'forward'}
+                                  onChange={(e) => updateMotorControl(motor.name, 'singleDirection', e.target.value)}
+                                  className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                                >
+                                  <option value="forward">Forward</option>
+                                  <option value="reverse">Reverse</option>
+                                </select>
+                              </div>
+                              <div className="col-span-4 text-xs text-gray-400">
+                                Only this button is bound. The opposite direction is left free for
+                                another motor or macro.
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     );
@@ -4556,7 +4752,11 @@ Make sure your code initializes the IMU with these orientations!
           { value: 'dpad_up', label: 'D-Pad Up' },
           { value: 'dpad_down', label: 'D-Pad Down' },
           { value: 'dpad_left', label: 'D-Pad Left' },
-          { value: 'dpad_right', label: 'D-Pad Right' }
+          { value: 'dpad_right', label: 'D-Pad Right' },
+          // Analog, so "pressed" is a threshold. Fixed at 0.5 rather than
+          // exposed — one less number to get wrong.
+          { value: 'left_trigger', label: 'Left Trigger' },
+          { value: 'right_trigger', label: 'Right Trigger' }
         ];
 
         const actionTypes = [
@@ -4568,6 +4768,10 @@ Make sure your code initializes the IMU with these orientations!
           // Motors
           { value: 'motor_position', label: '⚙️ Motor to Position', icon: '⚙️', category: 'motor' },
           { value: 'motor_time', label: '🔄 Run Motor for Time', icon: '🔄', category: 'motor' },
+          // Latching. Sets power and returns, so the macro finishes while the
+          // motor keeps running — the robot can drive with the intake on.
+          { value: 'motor_on', label: '▶️ Turn Motor On (stays on)', icon: '▶️', category: 'motor' },
+          { value: 'motor_off', label: '⏹️ Turn Motor Off', icon: '⏹️', category: 'motor' },
           { value: 'motor_until_velocity', label: '🏎️ Motor Until Velocity', icon: '🏎️', category: 'motor' },
           { value: 'wait_velocity', label: '⏸️ Wait for Velocity', icon: '⏸️', category: 'motor' },
           // Other
@@ -4862,6 +5066,49 @@ Make sure your code initializes the IMU with these orientations!
                       onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                  </div>
+                </div>
+              );
+            case 'motor_on':
+              return (
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400">Power (- reverse)</label>
+                    <input
+                      type="number" min="-1.0" max="1.0" step="0.1"
+                      value={step.motorPower}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    />
+                  </div>
+                  <div className="col-span-2 text-xs text-gray-400">
+                    Stays running after the macro ends. Stop it with a Turn Motor Off step in another
+                    macro, or the START button, which stops everything.
+                  </div>
+                </div>
+              );
+            case 'motor_off':
+              return (
+                <div className="grid grid-cols-1 gap-2 mt-2">
+                  <div>
+                    <label className="block text-xs text-gray-400">Motor</label>
+                    <select
+                      value={step.motorName}
+                      onChange={(e) => updateStep(macro.id, step.id, 'motorName', e.target.value)}
+                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                    >
+                      {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
                   </div>
                 </div>
               );
