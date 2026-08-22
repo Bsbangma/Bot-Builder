@@ -24,7 +24,6 @@
 // identifier goes through here first. The hardware NAME strings sent to
 // hardwareMap are left untouched — those must match the Driver Station config
 // exactly, spaces and all.
-    //here is the code before the issue.
 const JAVA_RESERVED = new Set(['abstract','assert','boolean','break','byte','case','catch','char',
   'class','const','continue','default','do','double','else','enum','extends','final','finally',
   'float','for','goto','if','implements','import','instanceof','int','interface','long','native',
@@ -539,6 +538,15 @@ const FTCRobotConfigurator = () => {
   };
 
   // Validation function
+  /** Lowest motor port on a hub with nothing on it, so a new motor does not
+   *  silently land on top of an existing one. */
+  const nextFreePort = (hub) => {
+    const taken = new Set((motors || []).concat(auxMotors || [])
+      .filter(m => (m.hub || 'control') === hub).map(m => Number(m.port)));
+    for (let p = 0; p <= 3; p++) if (!taken.has(p)) return p;
+    return 0;
+  };
+
   const driverPad = () => (gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2');
 
   const getValidationWarnings = () => {
@@ -581,8 +589,8 @@ const FTCRobotConfigurator = () => {
     }
     
     // Check if no drive motors configured
-    if (motors.length === 0) {
-      warnings.push({ type: 'warning', message: 'No drive motors configured' });
+    if (motors.length === 0 && (auxMotors || []).length === 0) {
+      warnings.push({ type: 'warning', message: 'No motors configured yet' });
     }
     
     // Macro steps pointing at hardware that no longer exists
@@ -603,6 +611,21 @@ const FTCRobotConfigurator = () => {
         warnings.push({ type: 'warning', message: `Tank drive detected (${dl.left.length} left, ${dl.right.length} right). Strafe and field-oriented driving are disabled — a differential drivetrain cannot move sideways.` });
       }
     })();
+
+    // A device left on the expansion hub after it is switched off is invisible
+    // in the Ports tab and will not resolve on the robot.
+    if (!hasExpansionHub) {
+      const orphans = (motors || []).concat(auxMotors || []).concat(servos || [])
+        .filter(d => d.hub === 'expansion');
+      orphans.forEach(d => warnings.push({ type: 'error',
+        message: `"${d.name}" is assigned to the expansion hub, but this robot has no expansion hub. Move it to the control hub or enable the expansion hub in the Drive tab.` }));
+    }
+
+    // Drive motors are optional. A bench setup with one motor is a real thing.
+    if ((motors || []).length === 0 && (auxMotors || []).length > 0) {
+      warnings.push({ type: 'warning',
+        message: 'No drive motors configured. The generated TeleOp will control mechanisms only, with no drivetrain — fine for bench testing.' });
+    }
 
     // Buttons assigned to more than one thing. The generated code reads them in
     // every place they appear, so one press fires all of them.
@@ -1099,6 +1122,188 @@ const FTCRobotConfigurator = () => {
       macros: exposedMacros,
       warnings: profileWarnings
     };
+  };
+
+  // ------------------------------------------------------------------
+  // Motor test OpMode.
+  //
+  // For a new chassis, before any direction is known. Every configured motor is
+  // declared and one runs at a time, at FORWARD with no direction applied, so
+  // what you see is what the motor physically does when told to go forward.
+  // Note which ones turn the wrong way, then set Reverse in BotBuilder.
+  //
+  // Deliberately does not apply the configured direction: the question here is
+  // "which way does this motor turn", not "is my config right".
+  // ------------------------------------------------------------------
+  const generateMotorTest = () => {
+    const all = (motors || []).map(m => ({ ...m, role: 'drive' }))
+      .concat((auxMotors || []).map(m => ({ ...m, role: 'aux' })));
+
+    if (!all.length) {
+      return '// No motors configured yet. Add at least one in the Drive or\n'
+           + '// Motors tab and this OpMode will appear here.';
+    }
+
+    // A motor whose encoder port carries an odometry pod reports the pod, not
+    // the motor, so its tick count means something different from the others.
+    const samePort = (x, y) => {
+      if (!x || !y) return false;
+      const xh = typeof x === 'object' ? x.hub : 'control';
+      const xp = typeof x === 'object' ? x.port : x;
+      return xh === (y.hub || 'control') && Number(xp) === Number(y.port);
+    };
+    const podOn = (m) => hasOdometry &&
+      ((odo1Port && samePort(odo1Port, m)) || (odo2Port && samePort(odo2Port, m)));
+
+    const className = javaClassName(robotName, 'MotorTest');
+    const L = [];
+    const P = (...xs) => xs.forEach(x => L.push(x));
+
+    P('package org.firstinspires.ftc.teamcode;',
+      '',
+      'import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;',
+      'import com.qualcomm.robotcore.eventloop.opmode.TeleOp;',
+      'import com.qualcomm.robotcore.hardware.DcMotor;',
+      'import com.qualcomm.robotcore.hardware.DcMotorEx;',
+      'import com.qualcomm.robotcore.hardware.DcMotorSimple;',
+      '',
+      '/**',
+      ` * ${className} — generated by BotBuilder from the "${robotName}" configuration.`,
+      ' *',
+      ' * Runs one motor at a time so you can see which way it turns.',
+      ' *',
+      ' * NOTHING IS REVERSED HERE. Every motor is left at Direction.FORWARD',
+      ' * whatever BotBuilder has configured, because on a new chassis the point',
+      ' * is to find out which way "forward" actually turns the wheel. Watch the',
+      ' * wheel, and if it turns the wrong way, tick Reverse Direction for that',
+      ' * motor in BotBuilder. The configured setting is shown in telemetry so',
+      ' * you can compare, but it is not applied.',
+      ' *',
+      ' * CONTROLS',
+      ' *   D-pad left / right   choose a motor',
+      ' *   right bumper         run forward at the test power',
+      ' *   left bumper          run reverse at the test power',
+      ' *   triggers             variable power, for finding the breakaway point',
+      ' *   D-pad up / down      adjust the test power by 0.05',
+      ' *',
+      ' * FINDING BREAKAWAY POWER',
+      ' *   Squeeze the right trigger slowly until the wheel just starts to move',
+      ' *   from a standstill. That reading is the lowest power that beats static',
+      ' *   friction — a little above it is a good value for MIN_POWER.',
+      ' */',
+      `@TeleOp(name = "${robotName} Motor Test", group = "Diagnostic")`,
+      `public class ${className} extends LinearOpMode {`,
+      '');
+
+    P('    private static final String[] NAMES = {',
+      '        ' + all.map(m => `"${m.name}"`).join(', '),
+      '    };',
+      '    private static final String[] PORTS = {',
+      '        ' + all.map(m => `"${m.hub || 'control'} hub, port ${m.port}"`).join(', '),
+      '    };',
+      '    private static final String[] ROLES = {',
+      '        ' + all.map(m => `"${m.role}"`).join(', '),
+      '    };',
+      '    /** What BotBuilder has configured. Shown for comparison, NOT applied. */',
+      '    private static final String[] CONFIGURED = {',
+      '        ' + all.map(m => `"${m.reversed ? 'REVERSE' : 'FORWARD'}"`).join(', '),
+      '    };',
+      '    /** True where the encoder port carries an odometry pod, not this motor. */',
+      '    private static final boolean[] READS_POD = {',
+      '        ' + all.map(m => (podOn(m) ? 'true' : 'false')).join(', '),
+      '    };',
+      '',
+      `    private final DcMotorEx[] motorList = new DcMotorEx[${all.length}];`,
+      '    private int selected = 0;',
+      '    private double testPower = 0.30;',
+      '',
+      '    private boolean prevLeft, prevRight, prevUp, prevDown;',
+      '');
+
+    P('    @Override',
+      '    public void runOpMode() {',
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            motorList[i] = hardwareMap.get(DcMotorEx.class, NAMES[i]);',
+      '            // Left FORWARD on purpose — see the class comment.',
+      '            motorList[i].setDirection(DcMotorSimple.Direction.FORWARD);',
+      '            motorList[i].setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);',
+      '            // Raw power, so what you command is what the motor gets.',
+      '            motorList[i].setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);',
+      '        }',
+      '',
+      `        telemetry.addLine("${robotName} motor test");`,
+      '        telemetry.addData("motors", NAMES.length);',
+      '        telemetry.addLine("");',
+      '        telemetry.addLine("Nothing is reversed here. Watch which way each");',
+      '        telemetry.addLine("wheel turns on the right bumper, and set Reverse");',
+      '        telemetry.addLine("in BotBuilder for any that are backwards.");',
+      '        telemetry.update();',
+      '',
+      '        waitForStart();',
+      '',
+      '        while (opModeIsActive()) {',
+      '            boolean left = gamepad1.dpad_left, right = gamepad1.dpad_right;',
+      '            boolean up = gamepad1.dpad_up, down = gamepad1.dpad_down;',
+      '',
+      '            if (right && !prevRight) { stopAll(); selected = (selected + 1) % NAMES.length; }',
+      '            if (left && !prevLeft) { stopAll(); selected = (selected + NAMES.length - 1) % NAMES.length; }',
+      '            if (up && !prevUp) testPower = Math.min(1.0, testPower + 0.05);',
+      '            if (down && !prevDown) testPower = Math.max(0.05, testPower - 0.05);',
+      '            prevLeft = left; prevRight = right; prevUp = up; prevDown = down;',
+      '',
+      '            // Triggers win when squeezed, so variable control overrides the',
+      '            // fixed test power without needing a mode switch.',
+      '            double trigger = gamepad1.right_trigger - gamepad1.left_trigger;',
+      '            double power;',
+      '            if (Math.abs(trigger) > 0.02) {',
+      '                power = trigger;',
+      '            } else if (gamepad1.right_bumper) {',
+      '                power = testPower;',
+      '            } else if (gamepad1.left_bumper) {',
+      '                power = -testPower;',
+      '            } else {',
+      '                power = 0;',
+      '            }',
+      '',
+      '            for (int i = 0; i < motorList.length; i++) {',
+      '                motorList[i].setPower(i == selected ? power : 0);',
+      '            }',
+      '',
+      '            report(power);',
+      '            telemetry.update();',
+      '        }',
+      '        stopAll();',
+      '    }',
+      '',
+      '    private void stopAll() {',
+      '        for (DcMotorEx m : motorList) m.setPower(0);',
+      '    }',
+      '',
+      '    private void report(double power) {',
+      '        telemetry.addData("motor", "%d of %d   %s", selected + 1, NAMES.length, NAMES[selected]);',
+      '        telemetry.addData("port", PORTS[selected] + "   (" + ROLES[selected] + ")");',
+      '        telemetry.addData("configured in BotBuilder", CONFIGURED[selected] + "   (not applied here)");',
+      '        telemetry.addData("test power", "%.2f   (d-pad up/down)", testPower);',
+      '        telemetry.addLine("");',
+      '        telemetry.addData("power", "%+.3f", power);',
+      '',
+      '        int ticks = motorList[selected].getCurrentPosition();',
+      '        double vel = motorList[selected].getVelocity();',
+      '        if (READS_POD[selected]) {',
+      '            telemetry.addData("encoder", "%d ticks  <-- ODOMETRY POD, not this motor", ticks);',
+      '        } else if (ticks == 0 && Math.abs(vel) < 0.5 && Math.abs(power) > 0.15) {',
+      '            telemetry.addData("encoder", "0 ticks  <-- no encoder, or not plugged in");',
+      '        } else {',
+      '            telemetry.addData("encoder", "%d ticks   %s", ticks,',
+      '                    Math.abs(vel) < 0.5 ? "steady" : (vel > 0 ? "counting UP" : "counting DOWN"));',
+      '        }',
+      '        telemetry.addData("velocity", "%.0f ticks/sec", vel);',
+      '        telemetry.addLine("");',
+      '        telemetry.addLine("d-pad L/R motor  ·  bumpers run  ·  triggers vary");',
+      '    }',
+      '}');
+
+    return L.join('\n');
   };
 
   // ------------------------------------------------------------------
@@ -3289,7 +3494,7 @@ Make sure your code initializes the IMU with these orientations!
                     name: `motor${newId}`, 
                     type: 'gobilda_5203_26_9', 
                     hub: 'control', 
-                    port: 0, 
+                    port: nextFreePort('control'), 
                     reversed: false 
                   }]);
                 }}
@@ -3454,12 +3659,15 @@ Make sure your code initializes the IMU with these orientations!
               <button
                 onClick={() => {
                   const newId = auxMotors.length > 0 ? Math.max(...auxMotors.map(m => m.id)) + 1 : 1;
+                  // Default to the control hub. Defaulting to expansion put the
+                  // motor on a hub the Ports tab does not draw unless the
+                  // expansion hub is enabled, so a lone motor was invisible.
                   setAuxMotors([...auxMotors, { 
                     id: newId, 
                     name: `auxMotor${newId}`, 
                     type: 'gobilda_5203_26_9', 
-                    hub: 'expansion', 
-                    port: 0, 
+                    hub: 'control', 
+                    port: nextFreePort('control'), 
                     reversed: false,
                     zeroPower: 'FLOAT'
                   }]);
@@ -5353,6 +5561,7 @@ Make sure your code initializes the IMU with these orientations!
       case 'output':
         const currentCode = codeOutputMode === 'teleop' ? generateCompleteTeleOp()
           : codeOutputMode === 'calibration' ? generateOdometryCalibration()
+          : codeOutputMode === 'motortest' ? generateMotorTest()
           : generateCodeSnippet();
         return (
           <div className="space-y-6">
@@ -5368,6 +5577,16 @@ Make sure your code initializes the IMU with these orientations!
                   }`}
                 >
                   Complete TeleOp
+                </button>
+                <button
+                  onClick={() => setCodeOutputMode('motortest')}
+                  className={`px-3 py-1 rounded text-sm font-medium ${
+                    codeOutputMode === 'motortest'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                  }`}
+                >
+                  Motor Test
                 </button>
                 <button
                   onClick={() => setCodeOutputMode('calibration')}
@@ -5395,6 +5614,12 @@ Make sure your code initializes the IMU with these orientations!
             <div className="bg-gray-700 p-3 rounded-lg text-sm text-gray-300">
               {codeOutputMode === 'teleop' ? (
                 <p>📋 <strong>Complete TeleOp:</strong> Ready-to-paste OpMode with field-oriented mecanum drive and all your controls configured. Copy this into OnBot Java or Android Studio.</p>
+              ) : codeOutputMode === 'motortest' ? (
+                <p>🔧 <strong>Motor Test:</strong> Runs one motor at a time so you can see which way it turns.
+                Nothing is reversed — every motor is left FORWARD whatever BotBuilder has configured, because on a
+                new chassis the point is to find out which way "forward" actually goes. Watch the wheel, then tick
+                Reverse Direction for any that are backwards. Triggers give variable power, useful for finding the
+                lowest power that moves the robot from a standstill.</p>
               ) : codeOutputMode === 'calibration' ? (
                 <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets. Motor names come from this configuration, so there is nothing to hand-edit. Includes a <strong>port scan</strong> — push the robot and see which ports actually move, so a mis-wired pod is visible instead of silently reading zero.</p>
               ) : (
@@ -5414,6 +5639,19 @@ Make sure your code initializes the IMU with these orientations!
               </button>
             </div>
 
+            {codeOutputMode === 'motortest' && (
+              <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
+                <h4 className="text-blue-400 font-semibold mb-2">🔧 Checking motor directions:</h4>
+                <ol className="text-blue-200 space-y-1 list-decimal list-inside">
+                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'MotorTest')}.java</code> and Build</li>
+                  <li>Put the robot on blocks so the wheels spin free</li>
+                  <li>D-pad left/right to pick a motor — its name, hub and port show in telemetry</li>
+                  <li>Hold the right bumper and watch which way that wheel turns</li>
+                  <li>For a mecanum drivetrain, all four should drive the robot forward. Any that do not need Reverse ticked in BotBuilder</li>
+                  <li>Squeeze the right trigger slowly to find the lowest power that moves it — that is your MIN_POWER</li>
+                </ol>
+              </div>
+            )}
             {codeOutputMode === 'calibration' && (
               <div className="bg-green-900 border border-green-600 p-3 rounded-lg text-sm">
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
