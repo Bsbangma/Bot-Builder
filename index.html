@@ -341,19 +341,14 @@ const FTCRobotConfigurator = () => {
   const servoDatabase = {
     // GoBilda Servos
     gobilda_speed: { name: 'GoBilda Speed Servo (2000-0025)', brand: 'GoBilda', speed: 0.055, torque: 21.0, range: 300 },
-    gobilda_continuous: { name: 'GoBilda Continuous Rotation Servo', brand: 'GoBilda', speed: 0.11, torque: 21.0, range: 360, continuous: true },
     gobilda_torque: { name: 'GoBilda Torque Servo (2000-0025)', brand: 'GoBilda', speed: 0.11, torque: 42.0, range: 300 },
     gobilda_super_speed: { name: 'GoBilda Super Speed Servo', brand: 'GoBilda', speed: 0.035, torque: 14.0, range: 300 },
     // REV Servos
     rev_smart_servo: { name: 'REV Smart Robot Servo', brand: 'REV', speed: 0.14, torque: 13.5, range: 280 },
-    // Continuous rotation servos are speed devices, not position devices. The
-    // SDK exposes them as CRServo with setPower(-1..1), and the Driver Station
-    // entry must say "Continuous Rotation Servo" to match.
-    rev_srs_continuous: { name: 'REV SRS Continuous Rotation', brand: 'REV', speed: 0.14, torque: 13.5, range: 360, continuous: true },
+    rev_srs_continuous: { name: 'REV SRS Continuous Rotation', brand: 'REV', speed: 0.14, torque: 13.5, range: 360 },
     // Axon Servos
     axon_max: { name: 'Axon MAX+ Servo', brand: 'Axon', speed: 0.065, torque: 52.0, range: 355 },
-    axon_mini: { name: 'Axon Mini Servo', brand: 'Axon', speed: 0.08, torque: 25.0, range: 355 },
-    generic_continuous: { name: 'Generic Continuous Rotation Servo', brand: 'Generic', speed: 0.12, torque: 15.0, range: 360, continuous: true }
+    axon_mini: { name: 'Axon Mini Servo', brand: 'Axon', speed: 0.08, torque: 25.0, range: 355 }
   };
 
   // Blinkin LED Pattern Database
@@ -571,10 +566,6 @@ const FTCRobotConfigurator = () => {
     for (let p = 0; p <= 3; p++) if (!taken.has(p)) return p;
     return 0;
   };
-
-  /** True for a servo that spins continuously — a speed device, driven through
-   *  CRServo.setPower rather than Servo.setPosition. */
-  const isContinuous = (sv) => !!(servoDatabase[sv.type] || {}).continuous;
 
   const driverPad = () => (gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2');
 
@@ -1566,22 +1557,6 @@ const FTCRobotConfigurator = () => {
       '        return imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.DEGREES);',
       '    }',
       '',
-      '    /**',
-      '     * Accumulated heading in the field convention: clockwise positive.',
-      '     *',
-      '     * The IMU reports yaw counter-clockwise positive, so this is the one place',
-      '     * that sign is flipped. Everything downstream reads this rather than',
-      '     * negating for itself — a stray negation here quietly corrupts the offsets',
-      '     * that every generated auto depends on.',
-      '     */',
-      '    private double fieldHeading() {',
-      '        return -unwrappedYaw;',
-      '    }',
-      '',
-      '    private double fieldHeadingRadians() {',
-      '        return Math.toRadians(fieldHeading());',
-      '    }',
-      '',
       '    private int parallelTicks() {',
       '        if (parallelPod == null) return 0;',
       '        int t = parallelPod.getCurrentPosition();',
@@ -1616,7 +1591,7 @@ const FTCRobotConfigurator = () => {
 
     P('    /** Rough pose for the verify step, using whatever constants are set now. */',
       '    private void updatePose() {',
-      '        double heading = fieldHeadingRadians();',
+      '        double heading = Math.toRadians(-unwrappedYaw);',
       '        double f = deltaParallel() / tpiParallel();',
       '        double l = deltaPerpendicular() / tpiPerpendicular();',
       '        poseX = f * Math.sin(heading) - l * Math.cos(heading);',
@@ -1641,7 +1616,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '            case 3: {',
       '                // Field heading is clockwise-positive; IMU yaw is counter-clockwise.',
-      '                double headingRad = fieldHeadingRadians();',
+      '                double headingRad = Math.toRadians(-unwrappedYaw);',
       '                if (Math.abs(headingRad) < 1e-6) break;',
       '                parallelXOffset = -(deltaParallel() / tpiParallel()) / headingRad;',
       '                perpendicularYOffset = -(deltaPerpendicular() / tpiPerpendicular()) / headingRad;',
@@ -1694,7 +1669,7 @@ const FTCRobotConfigurator = () => {
       '                telemetry.addData("Rotate CLOCKWISE", "%.0f turns in place, then press B", SPIN_TEST_REVOLUTIONS);',
       '                telemetry.addLine("Keep the centre of rotation fixed.");',
       '                telemetry.addLine("");',
-      '                telemetry.addData("turns so far", "%.2f", fieldHeading() / 360.0);',
+      '                telemetry.addData("turns so far", "%.2f", -unwrappedYaw / 360.0);',
       '                telemetry.addData("parallel ticks", deltaParallel());',
       '                telemetry.addData("perp ticks", deltaPerpendicular());',
       '                break;',
@@ -1706,7 +1681,7 @@ const FTCRobotConfigurator = () => {
       '                telemetry.addLine("");',
       '                telemetry.addData("x", "%.2f", poseX);',
       '                telemetry.addData("y", "%.2f", poseY);',
-      '                telemetry.addData("heading", "%.1f", fieldHeading());',
+      '                telemetry.addData("heading", "%.1f", -unwrappedYaw);',
       '                telemetry.addData("error from origin", "%.2f in", Math.hypot(poseX, poseY));',
       '                break;',
       '',
@@ -2062,37 +2037,6 @@ ${sensors.map(s => {
     // Generate servo control code
     const generateServoControlCode = (servoArg) => {
       const servo = { ...servoArg, name: javaVarName(servoArg.name), label: servoArg.name };
-
-      // A continuous servo is a speed device. Two "positions" make no sense for
-      // it — what you want is run and stop, the way a motor works.
-      if (isContinuous(servoArg)) {
-        const c = servoControls[servoArg.name] || {
-          controller: operatorGamepad, button: 'a', behavior: 'hold',
-          power: 1.0, reverseButton: 'none'
-        };
-        const gp = c.controller;
-        const pw = c.power !== undefined ? c.power : 1.0;
-        const fwd = getButtonCode(c.button || 'a', gp);
-        const rev = (c.reverseButton && c.reverseButton !== 'none')
-          ? getButtonCode(c.reverseButton, gp) : null;
-
-        if (c.behavior === 'toggle') {
-          return `        // ${servo.label} - continuous servo, toggle
-        if (${fwd} && !${servo.name}ButtonPrev) {
-            ${servo.name}Running = !${servo.name}Running;
-        }
-        ${servo.name}ButtonPrev = ${fwd};
-        ${servo.name}.setPower(${servo.name}Running ? ${pw} : 0);`;
-        }
-        return rev
-          ? `        // ${servo.label} - continuous servo, hold to run
-        if (${fwd}) ${servo.name}.setPower(${pw});
-        else if (${rev}) ${servo.name}.setPower(-${pw});
-        else ${servo.name}.setPower(0);`
-          : `        // ${servo.label} - continuous servo, hold to run
-        ${servo.name}.setPower(${fwd} ? ${pw} : 0);`;
-      }
-
       const ctrl = servoControls[servo.name] || {
         controller: operatorGamepad,
         button: 'a',
@@ -2118,7 +2062,7 @@ ${sensors.map(s => {
 
     // Build toggle state variables
     const toggleMotors = auxMotors.filter(m => (motorControls[m.name]?.behavior || 'hold') === 'toggle');
-    const toggleServos = servos.filter(s => (servoControls[s.name]?.behavior || (isContinuous(s) ? 'hold' : 'toggle')) === 'toggle');
+    const toggleServos = servos.filter(s => (servoControls[s.name]?.behavior || 'toggle') === 'toggle');
 
     return `package org.firstinspires.ftc.teamcode;
 
@@ -2128,7 +2072,6 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.Servo;
-${servos.some(sv => isContinuous(sv)) || hasBlinkin ? '' : ''}${servos.some(sv => isContinuous(sv)) ? 'import com.qualcomm.robotcore.hardware.CRServo;' : ''}
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
@@ -2161,7 +2104,7 @@ ${auxMotors.length > 0 ? `    // Auxiliary Motors (DcMotorEx for velocity)
 ${auxMotors.map(m => `    private DcMotorEx ${javaVarName(m.name)};`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `    // Servos
-${servos.map(s => `    private ${isContinuous(s) ? 'CRServo' : 'Servo'} ${javaVarName(s.name)};${isContinuous(s) ? '   // continuous rotation: a speed device' : ''}`).join('\n')}` : ''}
+${servos.map(s => `    private Servo ${javaVarName(s.name)};`).join('\n')}` : ''}
 
 ${sensors.length > 0 ? `    // Sensors
 ${sensors.map(sn => {
@@ -2221,7 +2164,7 @@ ${toggleMotors.map(m => `    private boolean ${javaVarName(m.name)}Running = fal
     private boolean ${javaVarName(m.name)}ButtonPrev = false;`).join('\n')}` : ''}
 
 ${toggleServos.length > 0 ? `    // Servo toggle states
-${toggleServos.map(s => `    private boolean ${javaVarName(s.name)}${isContinuous(s) ? 'Running' : 'Open'} = false;
+${toggleServos.map(s => `    private boolean ${javaVarName(s.name)}Open = false;
     private boolean ${javaVarName(s.name)}ButtonPrev = false;`).join('\n')}` : ''}
 
 ${macros.length > 0 ? `    // Macro states
@@ -2245,10 +2188,7 @@ ${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx
         ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
-${servos.map(s => isContinuous(s)
-  ? `        ${javaVarName(s.name)} = hardwareMap.get(CRServo.class, "${s.name}");
-        ${javaVarName(s.name)}.setPower(0);  // stopped until a control asks for motion`
-  : `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");${
+${servos.map(s => `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");${
   (servoControls[s.name] && servoControls[s.name].position1 !== undefined)
     ? `\n        ${javaVarName(s.name)}.setPosition(${servoControls[s.name].position1});  // starting position`
     : ''}`).join('\n')}` : ''}
@@ -2615,13 +2555,6 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
 ` : ''}
             // Heading is read every loop, not just while driving, because the
             // telemetry below needs it even when a macro has the drivetrain.
-            //
-            // NOTE the convention here differs from the generated autonomous and
-            // the calibration OpMode, which both use a clockwise-positive field
-            // heading. TeleOp works directly in the IMU's own counter-clockwise
-            // yaw, because field-oriented drive only needs a consistent frame,
-            // not a field one. Do not "fix" this to match — the transform below
-            // is built for this convention.
             double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
 
             // === DRIVE CONTROLS (disabled during macro) ===
@@ -2752,7 +2685,7 @@ ${telemetryDriveMotors ? (() => {
   return '';
 })() : ''}
 ${telemetryAuxMotors && auxMotors.length > 0 ? `            telemetry.addData("Motors", "${auxMotors.map(m => `${m.name}:%.2f`).join(' | ')}", ${auxMotors.map(m => `${javaVarName(m.name)}.getPower()`).join(', ')});` : ''}
-${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${javaVarName(s.name)}.${isContinuous(s) ? 'getPower' : 'getPosition'}()`).join(', ')});` : ''}
+${telemetryServos && servos.length > 0 ? `            telemetry.addData("Servos", "${servos.map(s => `${s.name}:%.2f`).join(' | ')}", ${servos.map(s => `${javaVarName(s.name)}.getPosition()`).join(', ')});` : ''}
 ${(() => {
   const of = (t) => (sensors || []).filter(sn => (sensorDatabase[sn.type] || {}).type === t);
   const out = [];
@@ -2978,7 +2911,7 @@ ${[0,1,2,3,4,5].map(port => {
   if (servo) {
     return `Port ${port}: 
   Name: "${servo.name}"
-  Type: ${isContinuous(servo) ? 'Continuous Rotation Servo   <-- NOT "Servo"' : 'Servo'}`;
+  Type: Servo`;
   }
   return `Port ${port}: (not used)`;
 }).join('\n\n')}
@@ -3039,7 +2972,7 @@ ${[0,1,2,3,4,5].map(port => {
   if (servo) {
     return `Port ${port}: 
   Name: "${servo.name}"
-  Type: ${isContinuous(servo) ? 'Continuous Rotation Servo   <-- NOT "Servo"' : 'Servo'}`;
+  Type: Servo`;
   }
   return `Port ${port}: (not used)`;
 }).join('\n\n')}
@@ -3530,17 +3463,13 @@ Make sure your code initializes the IMU with these orientations!
                   onChange={(e) => setImuLogoDirection(e.target.value)}
                   className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
                 >
-                  <option value="UP">UP — readable from above the robot</option>
-                  <option value="DOWN">DOWN — readable from underneath</option>
-                  <option value="LEFT">LEFT — readable standing at the robot's left</option>
-                  <option value="RIGHT">RIGHT — readable standing at the robot's right</option>
-                  <option value="FORWARD">FORWARD — readable from in front</option>
-                  <option value="BACKWARD">BACKWARD — readable from behind</option>
+                  <option value="UP">UP</option>
+                  <option value="DOWN">DOWN</option>
+                  <option value="LEFT">LEFT</option>
+                  <option value="RIGHT">RIGHT</option>
+                  <option value="FORWARD">FORWARD</option>
+                  <option value="BACKWARD">BACKWARD</option>
                 </select>
-                <span className="text-xs text-gray-400">
-                  Stand where you can read the REV logo the right way up. That side of the
-                  robot is the answer — left and right are the robot's own, looking forward.
-                </span>
               </div>
               <div>
                 <label className="block text-sm text-gray-300 mb-1">USB Facing Direction</label>
@@ -3549,47 +3478,17 @@ Make sure your code initializes the IMU with these orientations!
                   onChange={(e) => setImuUsbDirection(e.target.value)}
                   className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white"
                 >
-                  <option value="FORWARD">FORWARD — cable comes in from the front</option>
-                  <option value="BACKWARD">BACKWARD — cable comes in from the back</option>
-                  <option value="LEFT">LEFT — cable comes in from the left</option>
-                  <option value="RIGHT">RIGHT — cable comes in from the right</option>
-                  <option value="UP">UP — cable comes in from above</option>
-                  <option value="DOWN">DOWN — cable comes in from below</option>
+                  <option value="FORWARD">FORWARD</option>
+                  <option value="BACKWARD">BACKWARD</option>
+                  <option value="LEFT">LEFT</option>
+                  <option value="RIGHT">RIGHT</option>
+                  <option value="UP">UP</option>
+                  <option value="DOWN">DOWN</option>
                 </select>
-                <span className="text-xs text-gray-400">
-                  Which way the port opening faces, so the direction you approach from
-                  when plugging a cable in.
-                </span>
               </div>
               <div className="bg-gray-700 p-3 rounded text-sm text-gray-400">
-                <p className="font-semibold text-blue-400 mb-1">How to read these</p>
-                <p className="mb-2">
-                  Walk around the robot until the REV logo reads the right way up. Whichever
-                  side you are standing on is the <strong className="text-gray-200">logo direction</strong> —
-                  and left and right mean the robot's own, as if you were sitting on it facing forward.
-                </p>
-                <p className="mb-2">
-                  For <strong className="text-gray-200">USB</strong>, look at the port opening and ask which
-                  direction you would come from to plug a cable in.
-                </p>
-                {(() => {
-                  const axis = (d) => (d === 'UP' || d === 'DOWN') ? 'vertical'
-                    : (d === 'LEFT' || d === 'RIGHT') ? 'lateral' : 'longitudinal';
-                  const clash = axis(imuLogoDirection) === axis(imuUsbDirection);
-                  return clash ? (
-                    <p className="text-red-400">
-                      {imuLogoDirection} and {imuUsbDirection} are on the same axis. The logo and the
-                      USB port are on different faces of the hub, so they cannot both point along it —
-                      one of them is wrong.
-                    </p>
-                  ) : (
-                    <p className="text-gray-500">
-                      Getting this wrong does not throw an error. It quietly corrupts every heading,
-                      and with it every position. Worth checking on the robot: rotate it 90° clockwise
-                      by hand and confirm the reported heading climbs by about 90.
-                    </p>
-                  );
-                })()}
+                <p className="font-semibold text-blue-400 mb-1">Tip:</p>
+                <p>Look at your Control Hub. Which way is the REV logo facing? Which way is the USB port facing?</p>
               </div>
             </div>
           </div>
@@ -4386,21 +4285,21 @@ Make sure your code initializes the IMU with these orientations!
         ];
 
         const motorControlOptions = [
-          { value: 'trigger_pair', label: 'RT forward + LT reverse (both)' },
-          { value: 'bumper_pair', label: 'RB forward + LB reverse (both)' },
-          { value: 'dpad_updown', label: 'D-Pad Up forward + Down reverse (both)' },
-          { value: 'dpad_leftright', label: 'D-Pad Left/Right (both)' },
+          { value: 'trigger_pair', label: 'RT Forward / LT Reverse' },
+          { value: 'bumper_pair', label: 'RB Forward / LB Reverse' },
+          { value: 'dpad_updown', label: 'D-Pad Up / Down' },
+          { value: 'dpad_leftright', label: 'D-Pad Left / Right' },
           { value: 'left_stick_y', label: 'Left Stick Y Axis' },
           { value: 'right_stick_y', label: 'Right Stick Y Axis' },
-          { value: 'ab_buttons', label: 'A forward + B reverse (both)' },
-          { value: 'xy_buttons', label: 'Y forward + X reverse (both)' },
+          { value: 'ab_buttons', label: 'A Forward / B Reverse' },
+          { value: 'xy_buttons', label: 'Y Forward / X Reverse' },
           // One button, one direction. The opposite direction is simply not
           // bound — useful where a mechanism only ever runs one way.
-          { value: 'single', label: 'Single button — pick any button, one direction' },
+          { value: 'single', label: 'Single button (one direction)' },
           // A latching motor_on step is pointless if a direct control writes to
           // the same motor every loop — the macro sets the power and the control
           // immediately overwrites it.
-          { value: 'none', label: 'Not directly controlled — macros only' }
+          { value: 'none', label: 'Not directly controlled (macros only)' }
         ];
 
         // A motor a macro latches on should not also be written every loop by a
@@ -4433,16 +4332,12 @@ Make sure your code initializes the IMU with these orientations!
         };
 
         const getDefaultServoControl = (servoName) => {
-          const sv = (servos || []).find(x => x.name === servoName);
-          const cont = sv && isContinuous(sv);
           return servoControls[servoName] || {
             controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
             button: 'a',
-            behavior: cont ? 'hold' : 'toggle',
+            behavior: 'toggle',
             position1: 0.0,
-            position2: 1.0,
-            power: 1.0,
-            reverseButton: 'none'
+            position2: 1.0
           };
         };
 
@@ -4644,11 +4539,6 @@ Make sure your code initializes the IMU with these orientations!
                             >
                               {motorControlOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                             </select>
-                            {ctrl.control !== 'single' && ctrl.control !== 'none' && (
-                              <span className="text-xs text-gray-500">
-                                Want just one button? Choose "Single button".
-                              </span>
-                            )}
                           </div>
                           <div>
                             <label className="block text-xs text-gray-400 mb-1">Behavior</label>
@@ -4717,78 +4607,6 @@ Make sure your code initializes the IMU with these orientations!
                 <div className="space-y-3">
                   {servos.map(servo => {
                     const ctrl = getDefaultServoControl(servo.name);
-                    // Continuous servos get motor-style controls: a run power and
-                    // buttons, rather than two positions that mean nothing to them.
-                    if (isContinuous(servo)) {
-                      return (
-                        <div key={servo.id} className="bg-gray-800 p-3 rounded-lg">
-                          <div className="flex justify-between items-center mb-2">
-                            <span className="text-white font-semibold">{servo.name}</span>
-                            <span className="text-gray-400 text-sm">{servoDatabase[servo.type]?.name}</span>
-                          </div>
-                          <div className="grid grid-cols-4 gap-2">
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">Controller</label>
-                              <select
-                                value={ctrl.controller}
-                                onChange={(e) => updateServoControl(servo.name, 'controller', e.target.value)}
-                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                              >
-                                <option value="gamepad1">Gamepad 1</option>
-                                {numControllers === 2 && <option value="gamepad2">Gamepad 2</option>}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">Run button</label>
-                              <select
-                                value={ctrl.button}
-                                onChange={(e) => updateServoControl(servo.name, 'button', e.target.value)}
-                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                              >
-                                {buttonOptions.filter(b => b.value !== 'none').map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">Reverse button</label>
-                              <select
-                                value={ctrl.reverseButton || 'none'}
-                                onChange={(e) => updateServoControl(servo.name, 'reverseButton', e.target.value)}
-                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                              >
-                                {buttonOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">Behavior</label>
-                              <select
-                                value={ctrl.behavior}
-                                onChange={(e) => updateServoControl(servo.name, 'behavior', e.target.value)}
-                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                              >
-                                <option value="hold">Hold (runs while pressed)</option>
-                                <option value="toggle">Toggle (press to start/stop)</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-xs text-gray-400 mb-1">Power</label>
-                              <input
-                                type="number" min="0.1" max="1.0" step="0.05"
-                                value={ctrl.power !== undefined ? ctrl.power : 1.0}
-                                onChange={(e) => updateServoControl(servo.name, 'power', parseFloat(e.target.value))}
-                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                              />
-                            </div>
-                            <div className="col-span-4 text-xs text-gray-400">
-                              Continuous rotation servo — a speed device, driven like a motor. In the
-                              Driver Station, configure this port as
-                              <strong className="text-gray-200"> Continuous Rotation Servo</strong>.
-                              {ctrl.behavior === 'toggle' && (ctrl.reverseButton && ctrl.reverseButton !== 'none')
-                                ? ' Reverse is ignored in toggle mode.' : ''}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
                     return (
                       <div key={servo.id} className="bg-gray-800 p-3 rounded-lg">
                         <div className="flex justify-between items-center mb-2">
