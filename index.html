@@ -5586,7 +5586,13 @@ Make sure your code initializes the IMU with these orientations!
                         <span className="text-xl">📦</span>
                         <span className="text-white font-semibold">{macro.name}</span>
                         <span className="text-gray-400 text-sm">
-                          ({macro.behavior === 'hold' ? 'Hold' : 'Press'} {triggerButtonOptions.find(b => b.value === macro.triggerButton)?.label})
+                          ({macro.triggerType === 'pathpilot'
+                            ? 'PathPilot only'
+                            : macro.triggerType === 'velocity_above' || macro.triggerType === 'velocity_below'
+                              ? 'Velocity'
+                              : macro.triggerType === 'tag_visible'
+                                ? 'Tag visible'
+                                : `${macro.behavior === 'hold' ? 'Hold' : 'Press'} ${triggerButtonOptions.find(b => b.value === macro.triggerButton)?.label}`})
                         </span>
                       </div>
                       <div className="flex gap-2">
@@ -5844,7 +5850,17 @@ Make sure your code initializes the IMU with these orientations!
                 {/* Summary */}
                 {editingMacro.steps.length > 0 && (
                   <div className="mt-4 p-3 bg-gray-900 rounded text-sm text-gray-300">
-                    <strong className="text-green-400">Summary:</strong> {editingMacro.behavior === 'hold' ? 'Hold' : 'Press'} {triggerButtonOptions.find(b => b.value === editingMacro.triggerButton)?.label} on {editingMacro.triggerController} →{' '}
+                    <strong className="text-green-400">Summary:</strong> {
+                      editingMacro.triggerType === 'pathpilot'
+                        ? 'PathPilot waypoint action'
+                        : editingMacro.triggerType === 'velocity_above'
+                          ? `When ${editingMacro.triggerMotor || 'motor'} velocity \u2265 ${editingMacro.triggerVelocity || 0}`
+                          : editingMacro.triggerType === 'velocity_below'
+                            ? `When ${editingMacro.triggerMotor || 'motor'} velocity \u2264 ${editingMacro.triggerVelocity || 0}`
+                            : editingMacro.triggerType === 'tag_visible'
+                              ? `When AprilTag ${editingMacro.triggerTagId || 21} is visible`
+                              : `${editingMacro.behavior === 'hold' ? 'Hold' : 'Press'} ${triggerButtonOptions.find(b => b.value === editingMacro.triggerButton)?.label} on ${editingMacro.triggerController}`
+                    } →{' '}
                     {editingMacro.steps.map((s, i) => (
                       <span key={s.id}>
                         {actionTypes.find(a => a.value === s.type)?.icon}
