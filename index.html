@@ -2412,16 +2412,34 @@ ${macros.map((macro, i) => {
   // No trigger means nothing can ever set activeMacro to this index.
   if (macro.triggerType === 'pathpilot') return '';
   
+  // Hold-to-run only means anything for a macro the driver physically holds.
+  // A toggle or an auto-trigger has no release to watch for.
+  const isHold = macro.behavior === 'hold'
+    && (macro.triggerType === 'button' || macro.triggerType === 'combo');
+
+  // The aux motors this macro actually drives. Zeroing every aux motor on
+  // release stops unrelated mechanisms — an intake macro should not stop the
+  // arm. Only the cancel button is a global stop.
+  const ownedMotors = [...new Set((macro.steps || [])
+    .filter(st => [...MOTOR_STEPS, 'motor_on', 'motor_off'].includes(st.type))
+    .map(st => st.motorName)
+    .filter(Boolean)
+    .filter(n => (auxMotors || []).some(m => m.name === n))
+    .map(n => javaVarName(n)))];
+
   let macroCode = `            if (activeMacro == ${i}) {
                 // ${macro.name}
-${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerType === 'combo') ? 
+${isHold ?
 `                // Hold behavior - check if button released
-                if (!${macro.triggerType === 'combo' ? 
-  `(${getButtonCode(macro.triggerCombo || 'left_bumper', macro.triggerController)} && ${getButtonCode(macro.triggerButton, macro.triggerController)})` : 
+                if (!${macro.triggerType === 'combo' ?
+  `(${getButtonCode(macro.triggerCombo || 'left_bumper', macro.triggerController)} && ${getButtonCode(macro.triggerButton, macro.triggerController)})` :
   getButtonCode(macro.triggerButton, macro.triggerController)}) {
                     activeMacro = -1;
                     macroStep = 0;
-                    ${auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ')}
+                    macroStepStarted = false;
+                    ${ownedMotors.length
+                        ? ownedMotors.map(v => `${v}.setPower(0);`).join('\n                    ')
+                        : '// this macro drives no auxiliary motors'}
                 } else ` : '                '}switch (macroStep) {
 `;
 
@@ -2466,16 +2484,19 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
 `;
         break;
       case 'motor_on':
-        macroCode += `                        // Latching: set power and move on. The motor keeps running
+        macroCode += `                        ${isHold
+          ? `// Hold: powered while the trigger is held. Releasing it stops this
+                        // motor through the release check at the top of the block.`
+          : `// Latching: set power and move on. The motor keeps running
                         // after this macro finishes, until a Turn Motor Off step,
-                        // another macro, or the START cancel.
-                        ${step.motorName}.setPower(${step.motorPower});
+                        // another macro, or the START cancel.`}
+                        ${javaVarName(step.motorName)}.setPower(${step.motorPower});
                         macroStep++;
                         break;
 `;
         break;
       case 'motor_off':
-        macroCode += `                        ${step.motorName}.setPower(0);
+        macroCode += `                        ${javaVarName(step.motorName)}.setPower(0);
                         macroStep++;
                         break;
 `;
@@ -2669,11 +2690,19 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
   });
   
   macroCode += `                    default:
-                        // Macro complete
+${isHold
+  ? `                        // Hold: every step has run, but the trigger is still down.
+                        // Park here rather than ending — clearing activeMacro would
+                        // take the release check above out of the loop, the trigger
+                        // block would re-fire next iteration, and whether a release
+                        // landed on an iteration that could see it would be chance.
+                        // That is what left the motor latched on about half the time.
+                        break;`
+  : `                        // Macro complete
                         activeMacro = -1;
                         macroStep = 0;
                         macroStepStarted = false;
-                        break;
+                        break;`}
                 }
             }
 `;
@@ -2691,8 +2720,26 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
             // is built for this convention.
             double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
 
-            // === DRIVE CONTROLS (disabled during macro) ===
-${macros.length > 0 ? `            if (activeMacro == -1) {` : ''}
+            // === DRIVE CONTROLS ===
+${macros.length > 0 ? (() => {
+  // Only a macro that actually steers should take the drivetrain. A macro that
+  // just spins an intake has no business freezing the driver — and driving into
+  // game elements with the intake running is the normal way to use one.
+  const steering = macros
+    .map((m, i) => ({ m, i }))
+    .filter(x => x.m.steps && x.m.steps.length > 0)
+    .filter(x => x.m.triggerType !== 'pathpilot')
+    .filter(x => !isMechanismOnly(x.m))
+    .map(x => x.i);
+  if (steering.length === 0) {
+    return `            // No configured macro steers, so the driver keeps the drivetrain
+            // and the manual mechanism controls at all times.
+            {`;
+  }
+  return `            // These macros steer, so the driver yields while one runs:
+            // ${macros.filter((m, i) => steering.includes(i)).map(m => m.name).join(', ')}
+            if (${steering.map(i => `activeMacro != ${i}`).join(' && ')}) {`;
+})() : ''}
             double forward = -${getAxisCode(driveForwardBack, driverGamepad)};
             double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
             double rotate = ${getAxisCode(driveRotate, driverGamepad)};
@@ -2783,7 +2830,7 @@ ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
-${macros.length > 0 ? `            } // End of activeMacro == -1 block` : ''}
+${macros.length > 0 ? `            } // End of driver-control block` : ''}
 
             // === TELEMETRY ===
 ${macros.length > 0 ? `            if (activeMacro != -1) {
