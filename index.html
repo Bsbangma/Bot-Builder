@@ -215,11 +215,36 @@ const FTCRobotConfigurator = () => {
   const [editingMacroId, setEditingMacroId] = React.useState(null);
   const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
 
-  // Load saved configs on mount
+  // Could not read the saved-config store on startup. Surfaced in the Save/Load
+  // UI rather than swallowed, so a team whose configs vanished knows why.
+  const [storageError, setStorageError] = React.useState(null);
+
+  // Load saved configs on mount.
+  //
+  // Everything here can fail: localStorage throws outright in a private window
+  // or with site data blocked, and a half-written or hand-edited value fails to
+  // parse. An uncaught throw here happens during the mount effect, so the whole
+  // configurator fails to render — a blank page, with no clue that one bad
+  // string in browser storage is the cause. Recover to an empty list instead.
   React.useEffect(() => {
-    const saved = localStorage.getItem('ftc_robot_configs');
-    if (saved) {
-      setSavedConfigs(JSON.parse(saved));
+    let saved = null;
+    try {
+      saved = localStorage.getItem('ftc_robot_configs');
+    } catch (e) {
+      setStorageError('Browser storage is unavailable, so saved configurations could not be loaded. ' +
+        'This usually means private browsing or blocked site data. Export to a file instead.');
+      return;
+    }
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved);
+      // A non-array would break every consumer below, which all assume .filter
+      // and .map. Treat a wrong shape the same as corrupt.
+      if (!Array.isArray(parsed)) throw new Error('not an array');
+      setSavedConfigs(parsed);
+    } catch (e) {
+      setStorageError('Saved configurations could not be read and were skipped. The stored data is ' +
+        'corrupt or from an incompatible version. Saving a configuration will overwrite it.');
     }
   }, []);
 
@@ -772,27 +797,43 @@ const FTCRobotConfigurator = () => {
     }
     
     setSavedConfigs(newConfigs);
-    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+    // A failed write must not look like a successful save. setItem throws when
+    // storage is blocked or the quota is full, and a team that believes a config
+    // is saved will not export it.
+    try {
+      localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+      setStorageError(null);
+    } catch (e) {
+      setStorageError('This configuration could NOT be saved to the browser. Use Export to save it ' +
+        'to a file — it will be lost when this page is closed.');
+    }
     setShowSaveModal(false);
   };
 
   // Load configuration
   const loadConfig = (config) => {
+    // Zero is a real measurement, not a missing one. A pod mounted flush to the
+    // right rail is genuinely 0 inches from right; with `||` that silently
+    // became the 9-inch default and every offset downstream was wrong by nine
+    // inches. Use this for any numeric field where zero is a legal value.
+    const numOr = (v, dflt) => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)))
+      ? dflt : Number(v);
+
     setRobotName(config.name || 'My Robot');
-    setRobotLength(config.robotLength || 18);
-    setRobotWidth(config.robotWidth || 18);
+    setRobotLength(numOr(config.robotLength, 18));
+    setRobotWidth(numOr(config.robotWidth, 18));
     setWheelBrand(config.wheelBrand || 'gobilda');
     setWheelType(config.wheelType || 'mecanum');
-    setWheelSize(config.wheelSize || 104);
+    setWheelSize(numOr(config.wheelSize, 104));
     setOdo1Type(config.odo1Type || 'gobilda_4bar');
-    setOdo1FromBack(config.odo1FromBack || 9);
-    setOdo1FromRight(config.odo1FromRight || 9);
+    setOdo1FromBack(numOr(config.odo1FromBack, 9));
+    setOdo1FromRight(numOr(config.odo1FromRight, 9));
     setOdo1Reversed(config.odo1Reversed || false);
     setOdo1Measures(config.odo1Measures || 'forward_back');
     setOdo1Port(config.odo1Port || { hub: 'control', port: 0 });
     setOdo2Type(config.odo2Type || 'gobilda_4bar');
-    setOdo2FromBack(config.odo2FromBack || 9);
-    setOdo2FromRight(config.odo2FromRight || 9);
+    setOdo2FromBack(numOr(config.odo2FromBack, 9));
+    setOdo2FromRight(numOr(config.odo2FromRight, 9));
     setOdo2Reversed(config.odo2Reversed || false);
     setOdo2Measures(config.odo2Measures || 'left_right');
     setOdo2Port(config.odo2Port || { hub: 'control', port: 1 });
@@ -807,9 +848,9 @@ const FTCRobotConfigurator = () => {
     setImuLogoDirection(config.imuLogoDirection || 'UP');
     setImuUsbDirection(config.imuUsbDirection || 'FORWARD');
     setLimelightVersion(config.limelightVersion || '3a');
-    setLimelightFromBack(config.limelightFromBack || 9);
-    setLimelightFromRight(config.limelightFromRight || 9);
-    setLimelightHeight(config.limelightHeight || 8);
+    setLimelightFromBack(numOr(config.limelightFromBack, 9));
+    setLimelightFromRight(numOr(config.limelightFromRight, 9));
+    setLimelightHeight(numOr(config.limelightHeight, 8));
     setLimelightFacing(config.limelightFacing || 'FORWARD');
     setMotors(config.motors || []);
     setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', ...m })));
@@ -820,8 +861,9 @@ const FTCRobotConfigurator = () => {
     setBlinkinPort(config.blinkinPort || { hub: 'control', port: 0 });
     setBlinkinPatterns(config.blinkinPatterns || []);
     setSensors(config.sensors || []);
-    setAprilTagSize(config.aprilTagSize || 165);
+    setAprilTagSize(numOr(config.aprilTagSize, 165));
     setTargetTags(config.targetTags || []);
+    // Not numOr: zero controllers is not a configuration anyone means.
     setNumControllers(config.numControllers || 2);
     setGamepad1Role(config.gamepad1Role || 'driver');
     setGamepad2Role(config.gamepad2Role || 'operator');
@@ -830,7 +872,8 @@ const FTCRobotConfigurator = () => {
     setDriveRotate(config.driveRotate || 'right_stick_x');
     setResetHeadingButton(config.resetHeadingButton || 'options');
     setSlowModeButton(config.slowModeButton || 'none');
-    setSlowModeSpeed(config.slowModeSpeed || 0.4);
+    // Zero is a legal slow-mode speed — it makes the button a hold-to-stop.
+    setSlowModeSpeed(numOr(config.slowModeSpeed, 0.4));
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setServoControls(config.servoControls || {});
@@ -845,7 +888,7 @@ const FTCRobotConfigurator = () => {
     setTelemetryLoopTime(config.telemetryLoopTime || false);
     setTelemetryAlerts(config.telemetryAlerts || false);
     setMacros(config.macros || []);
-    setDefaultTolerance(config.defaultTolerance || 1.0);
+    setDefaultTolerance(numOr(config.defaultTolerance, 1.0));
     setShowLoadModal(false);
   };
 
@@ -853,7 +896,13 @@ const FTCRobotConfigurator = () => {
   const deleteConfig = (configName) => {
     const newConfigs = savedConfigs.filter(c => c.name !== configName);
     setSavedConfigs(newConfigs);
-    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+    try {
+      localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+      setStorageError(null);
+    } catch (e) {
+      setStorageError('The deletion could not be written to browser storage, so this configuration ' +
+        'will reappear when the page is reloaded.');
+    }
   };
 
   // Export configuration as JSON file
@@ -6868,6 +6917,15 @@ Make sure your code initializes the IMU with these orientations!
             </label>
           </div>
         </div>
+
+        {/* Browser storage problem. Separate from configuration warnings: this
+            is about whether saving works at all, not about the robot. */}
+        {storageError && (
+          <div className="mt-4 bg-gray-800 border border-red-600 rounded-lg p-3">
+            <h4 className="text-red-400 font-semibold mb-1">💾 Browser Storage</h4>
+            <div className="text-sm text-red-300">{storageError}</div>
+          </div>
+        )}
 
         {/* Validation Warnings */}
         {validationWarnings.length > 0 && (
