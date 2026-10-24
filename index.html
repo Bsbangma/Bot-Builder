@@ -389,10 +389,27 @@ const FTCRobotConfigurator = () => {
   };
 
   /**
+   * Whether this motor has a usable encoder.
+   *
+   * Two things have to be true: the motor type has one, and the cable is
+   * plugged in. The database knows the first; only the user knows the second,
+   * which is what the per-motor flag records. Missing means true — every config
+   * saved before the flag existed was generated as if encoders were present.
+   */
+  const hasEncoder = (m) => {
+    if (!m) return false;
+    const s = motorSpecs(m) || {};
+    if (!(Number(s.ticksPerRev) > 0)) return false;
+    return m.hasEncoder === undefined ? true : !!m.hasEncoder;
+  };
+
+  /**
    * Free-running speed in encoder ticks per second — the unit setVelocity takes.
-   * Zero when the motor has no encoder, which is how velocity mode is refused.
+   * Zero when the motor has no usable encoder, which is how velocity mode is
+   * refused.
    */
   const motorMaxTicksPerSec = (m) => {
+    if (!hasEncoder(m)) return 0;
     const s = motorSpecs(m) || {};
     const rpm = Number(s.rpm) || 0;
     const tpr = Number(s.ticksPerRev) || 0;
@@ -469,8 +486,11 @@ const FTCRobotConfigurator = () => {
    * the motor, so the PID would regulate against a free-spinning dead wheel.
    */
   const velocityBlockedReason = (m) => {
-    if (motorMaxTicksPerSec(m) <= 0) {
-      return 'this motor has no encoder, so it cannot hold a velocity';
+    if (!hasEncoder(m)) {
+      const typeHasOne = Number((motorSpecs(m) || {}).ticksPerRev) > 0;
+      return typeHasOne
+        ? 'its encoder is marked as not connected in the Motors tab'
+        : 'this motor type has no encoder';
     }
     const onPod = (p) => p && (p.hub || 'control') === (m.hub || 'control')
       && Number(p.port) === Number(m.port);
@@ -651,11 +671,18 @@ const FTCRobotConfigurator = () => {
   const SERVO_STEPS = ['servo_position'];
   const VISION_STEPS = ['drive_to_tag'];
 
+  // Steps that read or regulate against the encoder. On a motor without one
+  // they do not merely underperform: RUN_TO_POSITION never arrives, and a
+  // velocity wait sees zero forever and only ever exits on its timeout.
+  const ENCODER_STEPS = ['motor_position', 'motor_until_velocity', 'wait_velocity'];
+
   const stepProblem = (st) => {
     if (MOTOR_STEPS.includes(st.type)) {
       if (!st.motorName) return 'no motor selected';
-      if (!(auxMotors || []).some(m => m.name === st.motorName))
-        return `motor "${st.motorName}" is not configured on this robot`;
+      const m = (auxMotors || []).find(x => x.name === st.motorName);
+      if (!m) return `motor "${st.motorName}" is not configured on this robot`;
+      if (ENCODER_STEPS.includes(st.type) && !hasEncoder(m))
+        return `motor "${st.motorName}" has no encoder connected, and this step needs one`;
     }
     if (SERVO_STEPS.includes(st.type)) {
       if (!st.servoName) return 'no servo selected';
@@ -1093,7 +1120,9 @@ const FTCRobotConfigurator = () => {
     setLimelightHeight(numOr(config.limelightHeight, 8));
     setLimelightFacing(config.limelightFacing || 'FORWARD');
     setMotors(config.motors || []);
-    setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', ...m })));
+    // hasEncoder defaults true for configs saved before the flag existed —
+    // that is what they were generated as.
+    setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', hasEncoder: true, ...m })));
     setDriveZeroPower(config.driveZeroPower || 'BRAKE');
     setServos(config.servos || []);
     setHasExpansionHub(config.hasExpansionHub || false);
@@ -1210,6 +1239,14 @@ const FTCRobotConfigurator = () => {
 
     (macro.steps || []).forEach((st, idx) => {
       body.push(`// step ${idx + 1}: ${st.type}`);
+      // Same gate the TeleOp generator applies. Without it a step that names a
+      // missing motor, or needs an encoder the motor does not have, emits
+      // uncompilable or non-terminating Java straight into PathPilot's auto.
+      const problem = stepProblem(st);
+      if (problem) {
+        body.push(`// SKIPPED: ${problem}. Fix the macro in BotBuilder.`);
+        return;
+      }
       body.push('if (!opModeIsActive()) return;');
       switch (st.type) {
         case 'motor_position':
@@ -1239,14 +1276,20 @@ const FTCRobotConfigurator = () => {
           body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           estSeconds += (st.motorDuration !== undefined ? Number(st.motorDuration) : 1.0);
           break;
-        case 'motor_until_velocity':
-          usedMotors.add(javaVarName(st.motorName));
-          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+        case 'motor_until_velocity': {
+          const v = javaVarName(st.motorName);
+          const tgt = Number(st.targetVelocity) || 0;
+          const tol = Number(st.velocityTolerance) || 100;
+          usedMotors.add(v);
+          body.push(`// closed-loop: hold ${tgt} ticks/sec, proceed once within ${tol}`);
+          body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+          body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
           body.push('macroTimer.reset();');
-          body.push(`while (opModeIsActive() && Math.abs(${javaVarName(st.motorName)}.getVelocity()) < ${st.targetVelocity || 0}`);
+          body.push(`while (opModeIsActive() && Math.abs(${v}.getVelocity() - ${tgt.toFixed(1)}) > ${tol.toFixed(1)}`);
           body.push(`       && macroTimer.seconds() < ${st.velocityTimeout || 3.0}) idle();`);
           estSeconds += Math.min(Number(st.velocityTimeout || 3.0), 1.5);
           break;
+        }
         case 'wait_velocity': {
           usedMotors.add(javaVarName(st.motorName));
           const cmp = st.velocityCondition === 'below' ? '>' : '<';
@@ -1478,7 +1521,11 @@ const FTCRobotConfigurator = () => {
       blinkin: hasBlinkin ? { present: true, hardwareName: 'blinkin' } : { present: false },
       auxMotors: (auxMotors || []).map(mm => ({
         hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed,
-        zeroPower: mm.zeroPower || 'FLOAT'
+        zeroPower: mm.zeroPower || 'FLOAT',
+        // PathPilot's autonomous init must pick the same run mode TeleOp does,
+        // or a motor that behaves in TeleOp surges in auto.
+        hasEncoder: hasEncoder(mm),
+        runMode: hasEncoder(mm) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'
       })),
       servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
       macros: exposedMacros,
@@ -2660,10 +2707,18 @@ ${motors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotor.clas
         ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${driveZeroPower});`).join('\n')}
 
 ${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx for velocity)
+        //
+        // Run mode follows whether an encoder is actually plugged in. With one,
+        // RUN_USING_ENCODER makes setPower(x) a velocity target that the hub's
+        // PID holds — consistent speed under load and across battery voltage.
+        // Without one, that same mode reads a velocity of zero forever, decides
+        // the motor is stalled, and drives it harder: the motor surges or runs
+        // flat out whatever power was asked for. RUN_WITHOUT_ENCODER makes
+        // setPower(x) plain voltage, which is the only thing that works there.
 ${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${javaString(m.name)}");
         ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
         ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});
-        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
+        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.${hasEncoder(m) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'});${hasEncoder(m) ? '' : '   // no encoder connected'}`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
 ${servos.map(s => isContinuous(s)
@@ -2897,20 +2952,31 @@ ${isHold ?
                         break;
 `;
         break;
-      case 'motor_until_velocity':
-        macroCode += `                        if (!macroStepStarted) {
-                            ${javaVarName(step.motorName)}.setPower(${step.motorPower});
+      case 'motor_until_velocity': {
+        const v = javaVarName(step.motorName);
+        const tgt = Number(step.targetVelocity) || 0;
+        const tol = Number(step.velocityTolerance) || 100;
+        macroCode += `                        // Spin up under closed-loop velocity control and hold there.
+                        // The PID regulates against the encoder, so the speed reached is
+                        // the one asked for regardless of battery voltage — unlike setPower,
+                        // where 0.5 is a different speed every match. This step used to drive
+                        // by power and treat the target only as a wait threshold.
+                        if (!macroStepStarted) {
+                            ${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                            ${v}.setVelocity(${tgt.toFixed(1)});
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
-                        if (Math.abs(${javaVarName(step.motorName)}.getVelocity()) >= ${step.targetVelocity} || macroTimer.seconds() >= ${step.velocityTimeout}) {
-                            // Keep motor running, move to next step
+                        if (Math.abs(${v}.getVelocity() - ${tgt.toFixed(1)}) <= ${tol.toFixed(1)}
+                                || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                            // Motor keeps holding its velocity; the macro moves on.
                             macroStep++;
                             macroStepStarted = false;
                         }
                         break;
 `;
         break;
+      }
       case 'wait_velocity':
         macroCode += `                        if (!macroStepStarted) {
                             macroTimer.reset();
@@ -4446,9 +4512,10 @@ Make sure your code initializes the IMU with these orientations!
                     name: `auxMotor${newId}`, 
                     type: 'gobilda_5203_26_9', 
                     hub: 'control', 
-                    port: nextFreePort('control'), 
+                    port: nextFreePort('control'),
                     reversed: false,
-                    zeroPower: 'FLOAT'
+                    zeroPower: 'FLOAT',
+                    hasEncoder: true
                   }]);
                 }}
                 className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
@@ -4606,6 +4673,36 @@ Make sure your code initializes the IMU with these orientations!
                         </select>
                       </div>
                     </div>
+                    {(() => {
+                      const typeHasOne = Number((motorSpecs(motor) || {}).ticksPerRev) > 0;
+                      const checked = motor.hasEncoder === undefined ? true : !!motor.hasEncoder;
+                      return (
+                        <div className="mt-2 flex items-start gap-3">
+                          <label className={`flex items-center gap-2 ${typeHasOne ? 'cursor-pointer' : 'opacity-50'}`}>
+                            <input
+                              type="checkbox"
+                              disabled={!typeHasOne}
+                              checked={typeHasOne && checked}
+                              onChange={(e) => {
+                                const updated = auxMotors.map(m =>
+                                  m.id === motor.id ? {...m, hasEncoder: e.target.checked} : m
+                                );
+                                setAuxMotors(updated);
+                              }}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-gray-300 text-sm">Encoder connected</span>
+                          </label>
+                          <span className="text-xs text-gray-500">
+                            {!typeHasOne
+                              ? 'This motor type has no encoder.'
+                              : checked
+                                ? 'RUN_USING_ENCODER — velocity control, position steps and at-speed LED available.'
+                                : 'RUN_WITHOUT_ENCODER — plain power only. Untick this if the encoder cable is not plugged in; with it ticked and no cable, the motor surges.'}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     <div className="mt-2 text-xs text-gray-400">
                       {motorSpecs(motor).rpm} RPM | {motorSpecs(motor).ticksPerRev} ticks/rev
                     </div>
@@ -5681,7 +5778,8 @@ Make sure your code initializes the IMU with these orientations!
             motorDuration: 1.0,
             // Velocity fields
             targetVelocity: 1000,
-            velocityCondition: 'above', // 'above' or 'below'
+            velocityTolerance: 100,     // ticks/sec band that counts as "at speed"
+            velocityCondition: 'above', // 'above' or 'below' — wait_velocity only
             velocityTimeout: 3.0,
             // Servo fields
             servoName: servos.length > 0 ? servos[0].name : '',
@@ -6001,22 +6099,35 @@ Make sure your code initializes the IMU with these orientations!
                     <label className="block text-xs text-gray-400">Target (ticks/sec)</label>
                     <input
                       type="number"
+                      step="10"
                       value={step.targetVelocity}
                       onChange={(e) => updateStep(macro.id, step.id, 'targetVelocity', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                    {(() => {
+                      const m = auxMotors.find(x => x.name === step.motorName);
+                      const max = m ? motorMaxTicksPerSec(m) : 0;
+                      const tpr = m ? (motorSpecs(m).ticksPerRev || 0) : 0;
+                      const rpm = tpr ? (Number(step.targetVelocity) || 0) * 60 / tpr : 0;
+                      if (!m) return null;
+                      return (
+                        <span className={`text-xs ${Math.abs(Number(step.targetVelocity) || 0) > max ? 'text-red-400' : 'text-gray-500'}`}>
+                          ≈{Math.round(rpm)} rpm · max {Math.round(max)}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400">Power</label>
+                    <label className="block text-xs text-gray-400">Tolerance (± ticks/sec)</label>
                     <input
                       type="number"
-                      min="-1.0"
-                      max="1.0"
-                      step="0.1"
-                      value={step.motorPower}
-                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      min="1"
+                      step="10"
+                      value={step.velocityTolerance !== undefined ? step.velocityTolerance : 100}
+                      onChange={(e) => updateStep(macro.id, step.id, 'velocityTolerance', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                    <span className="text-xs text-gray-500">proceeds once inside this band</span>
                   </div>
                   <div>
                     <label className="block text-xs text-gray-400">Timeout (sec)</label>
@@ -6027,6 +6138,11 @@ Make sure your code initializes the IMU with these orientations!
                       onChange={(e) => updateStep(macro.id, step.id, 'velocityTimeout', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                  </div>
+                  <div className="col-span-4 text-xs text-gray-400">
+                    Holds the motor at the target under closed-loop control and moves on once it
+                    gets there (or the timeout passes). The motor keeps running afterwards — use
+                    Turn Motor Off to stop it.
                   </div>
                 </div>
               );
