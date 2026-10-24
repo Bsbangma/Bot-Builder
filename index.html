@@ -892,6 +892,13 @@ const FTCRobotConfigurator = () => {
         options: 'Options', start: 'Start', back: 'Back'
       };
       const label = (v) => BUTTON_LABELS[v] || v;
+      // Macro cancel is hardcoded to START on every gamepad, so it is a claim
+      // like any other even though no setting produces it. Without this the
+      // conflict check cannot see the one collision the generator builds in.
+      if ((macros || []).length > 0) {
+        claims.push(['start', 'macro cancel', 'gamepad1']);
+        if (numControllers === 2) claims.push(['start', 'macro cancel', 'gamepad2']);
+      }
       if (resetHeadingButton && resetHeadingButton !== 'none') claims.push([resetHeadingButton, 'reset heading', driverPad()]);
       if (slowModeButton && slowModeButton !== 'none') claims.push([slowModeButton, 'slow mode', driverPad()]);
       if (robotOrientedButton && robotOrientedButton !== 'none') claims.push([robotOrientedButton, 'robot-oriented toggle', driverPad()]);
@@ -2664,11 +2671,17 @@ ${macros.length > 0 ? `        telemetry.addLine("Macros: ${macros.length} confi
 
         while (opModeIsActive()) {
 ${macros.length > 0 ? `            // === MACRO CANCEL (START button) ===
+            //
+            // START is reserved for this on both gamepads. Anything else bound
+            // to it reads the same press, which is why BotBuilder warns when a
+            // control claims it.
+            boolean macroJustCancelled = false;
             if (gamepad1.start${numControllers === 1 ? '' : ' || gamepad2.start'}) {
                 if (activeMacro != -1) {
                     activeMacro = -1;
                     macroStep = 0;
                     macroStepStarted = false;
+                    macroJustCancelled = true;
                     // Stop all motors when canceling
                     ${auxMotors.length ? auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ') : '// no auxiliary motors to stop'}
                 }
@@ -3025,6 +3038,41 @@ ${isHold
   return macroCode;
 }).join('\n')}
 ` : ''}
+${driveLayout().kind === 'mecanum' ? `            // === ORIENTATION CONTROLS ===
+            //
+            // Outside the drive block, and ahead of the heading read.
+            //
+            // Outside, because these are not drive maths — they decide which way
+            // the robot thinks downfield is, and that has to stay answerable even
+            // while a macro holds the drivetrain. Inside the block, the edge
+            // detector below also stopped updating whenever the block was
+            // skipped, so its memory went stale and a press after a macro
+            // ended fired or did not fire depending on what the flag happened
+            // to be left holding.
+            //
+            // Ahead of the heading read, so a re-zero takes effect on the same
+            // iteration rather than one loop later.
+${resetHeadingButton !== 'none' ? `            // Re-zero heading and return to field-oriented. Whatever direction the
+            // robot is physically facing becomes the new "downfield", so point it
+            // that way before pressing.
+            if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
+                headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+                fieldOriented = true;
+            }` : '            // No re-zero button is assigned.'}
+${robotOrientedButton !== 'none' ? `${macros.length > 0 && robotOrientedButton === 'start' ? `
+            // START also cancels macros, above. When one press does both, the
+            // cancel wins and the orientation is left alone — a driver stopping
+            // a jammed mechanism is not asking to have the steering inverted as
+            // well. Assign this toggle to another button to be rid of the
+            // ambiguity; BotBuilder warns about it in Configuration Issues.
+            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev && activeMacro == -1 && !macroJustCancelled) {` : `
+            // Toggle between field- and robot-oriented. Does not touch heading.
+            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev) {`}
+                fieldOriented = !fieldOriented;
+            }
+            orientationButtonPrev = ${getButtonCode(robotOrientedButton, driverGamepad)};` : ''}
+` : `            // Tank drive is always robot-oriented, so there is no heading to
+            // reset and nothing to toggle.`}
             // Heading is read every loop, not just while driving, because the
             // telemetry below needs it even when a macro has the drivetrain.
             //
@@ -3060,19 +3108,9 @@ ${macros.length > 0 ? (() => {
             double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
             double rotate = ${getAxisCode(driveRotate, driverGamepad)};
 
-${driveLayout().kind === 'mecanum' ? `            // Re-zero heading and return to field-oriented. Whatever direction the
-            // robot is physically facing becomes the new "downfield", so point it
-            // that way before pressing.
-            if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
-                headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
-                fieldOriented = true;
-            }` : `            // Tank drive is always robot-oriented, so there is no heading to reset.`}
-${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `
-            // Toggle between field- and robot-oriented. Does not touch heading.
-            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev) {
-                fieldOriented = !fieldOriented;
-            }
-            orientationButtonPrev = ${getButtonCode(robotOrientedButton, driverGamepad)};` : ''}
+            // Heading re-zero and the field/robot toggle are handled above, in
+            // ORIENTATION CONTROLS — they must keep working while a macro has
+            // the drivetrain.
 
 ${slowModeButton !== 'none' ? `            // Slow mode
             double speedMultiplier = ${getButtonCode(slowModeButton, driverGamepad)} ? ${slowModeSpeed} : 1.0;
