@@ -1736,10 +1736,14 @@ const FTCRobotConfigurator = () => {
       ' * Measures the four odometry numbers that cannot be derived on paper, and',
       ' * prints values to type back into BotBuilder.',
       ' *',
-      ' *   0. PORT SCAN  see raw ticks on every motor port at once',
-      ' *   1. STRAIGHT   push a known distance forward  -> parallel ticks/inch',
-      ' *   2. STRAFE     push a known distance left     -> perpendicular ticks/inch',
-      ' *   3. SPIN       rotate N turns in place        -> both pod offsets',
+      ' *   1. PORT SCAN  see raw ticks on every motor port at once',
+      ' *   2. STRAIGHT   push a known distance forward        -> parallel ticks/inch',
+      ' *   3. STRAFE     push left, record, push right, record -> perpendicular ticks/inch',
+      ' *                 (two pushes so a reversed pod shows up as a sign disagreement)',
+      ' *   4. SPIN       rotate N turns in place              -> both pod offsets',
+      ' *   5. VERIFY     push a square and check the pose returns to 0,0',
+      ' *',
+      ' *   D-pad up/down moves between tests. A re-zeros the current test. B records.',
       ' *',
       ' * WHY THE SPIN TEST WORKS',
       ' *   Spinning in place moves the robot centre nowhere, so every tick a pod',
@@ -1834,7 +1838,7 @@ const FTCRobotConfigurator = () => {
       '        telemetry.addLine("A             : zero this test");',
       '        telemetry.addLine("B             : record result");',
       '        telemetry.addLine("");',
-      '        telemetry.addLine("Start on TEST 0 (port scan) if you are unsure");',
+      '        telemetry.addLine("Start on TEST 1 (port scan) if you are unsure");',
       '        telemetry.addLine("which port your pods are plugged into.");',
       '        telemetry.update();',
       '',
@@ -1979,7 +1983,7 @@ const FTCRobotConfigurator = () => {
     P('    private void render() {',
       '        switch (test) {',
       '            case 0:',
-      '                telemetry.addLine("TEST 0/4  PORT SCAN");',
+      '                telemetry.addLine("TEST 1 of 5  PORT SCAN");',
       '                telemetry.addLine("Push the robot and watch which ports move.");',
       '                telemetry.addLine("A pod shows thousands of ticks; a bare motor port shows 0.");',
       '                telemetry.addLine("");',
@@ -1995,7 +1999,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 1:',
-      '                telemetry.addLine("TEST 1/4  STRAIGHT");',
+      '                telemetry.addLine("TEST 2 of 5  STRAIGHT");',
       '                telemetry.addData("Push FORWARD exactly", "%.1f in, then press B", STRAIGHT_TEST_INCHES);',
       '                telemetry.addLine("");',
       '                telemetry.addData("parallel ticks", deltaParallel());',
@@ -2004,7 +2008,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 2:',
-      '                telemetry.addLine("TEST 2/4  STRAFE  (two pushes)");',
+      '                telemetry.addLine("TEST 3 of 5  STRAFE  (two pushes)");',
       '                if (!strafeLeftDone) {',
       '                    telemetry.addData("1. Push the ROBOT\'S LEFT", "%.1f in, then press B", STRAFE_TEST_INCHES);',
       '                    telemetry.addLine("   (stand behind the robot and that is your left too)");',
@@ -2045,7 +2049,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 3:',
-      '                telemetry.addLine("TEST 3/4  SPIN");',
+      '                telemetry.addLine("TEST 4 of 5  SPIN");',
       '                telemetry.addData("Rotate CLOCKWISE", "%.0f turns in place, then press B", SPIN_TEST_REVOLUTIONS);',
       '                telemetry.addLine("Keep the centre of rotation fixed.");',
       '                telemetry.addLine("");',
@@ -2055,7 +2059,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 4:',
-      '                telemetry.addLine("TEST 4/4  VERIFY");',
+      '                telemetry.addLine("TEST 5 of 5  VERIFY");',
       '                telemetry.addLine("Type the results into BotBuilder, regenerate,");',
       '                telemetry.addLine("then push a square here and check it returns to 0,0.");',
       '                telemetry.addLine("");',
@@ -2069,6 +2073,11 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '        }',
       '',
+      '        // Always visible. Nobody at the field remembers which button changes',
+      '        // test, and the person holding the gamepad is rarely the one who read',
+      '        // the instructions.',
+      '        telemetry.addLine("");',
+      '        telemetry.addLine("D-PAD UP/DOWN change test   A re-zero   B record");',
       '        telemetry.addLine("");',
       '        telemetry.addLine("RESULTS  (type these into BotBuilder)");',
       '        report("parallel ticks/inch", straightTicksPerInch, PARALLEL_TICKS_PER_INCH);',
@@ -6718,7 +6727,7 @@ Make sure your code initializes the IMU with these orientations!
                 Reverse Direction for any that are backwards. Triggers give variable power, useful for finding the
                 lowest power that moves the robot from a standstill.</p>
               ) : codeOutputMode === 'calibration' ? (
-                <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets. Motor names come from this configuration, so there is nothing to hand-edit. Includes a <strong>port scan</strong> — push the robot and see which ports actually move, so a mis-wired pod is visible instead of silently reading zero.</p>
+                <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets in five tests: port scan, straight push, two-push strafe, spin, verify. Motor names come from this configuration, so there is nothing to hand-edit. The <strong>port scan</strong> shows which ports actually move, so a mis-wired pod is visible instead of silently reading zero; the <strong>two-push strafe</strong> catches a reversed pod by checking that left and right disagree in sign.</p>
               ) : (
                 <p>📋 <strong>Config Snippet:</strong> Just the constants and initialization code. Paste into your own OpMode.</p>
               )}
@@ -6754,13 +6763,15 @@ Make sure your code initializes the IMU with these orientations!
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
                 <ol className="text-green-200 space-y-1 list-decimal list-inside">
                   <li>Paste into OnBot Java as <code className="bg-green-800 px-1 rounded">{javaClassName(robotName, 'OdometryCalibration')}.java</code> and Build</li>
-                  <li>Run it, then start on <strong>Test 0 (port scan)</strong> and push the robot — confirm the moving ports are the two named as your pods</li>
-                  <li>Test 1: push forward exactly 48" (two tiles), press B</li>
-                  <li>Test 2: push left exactly 48", press B</li>
-                  <li>Test 3: spin 10 turns clockwise about a fixed point, press B</li>
-                  <li>Type the four results into the <strong>Odometry</strong> tab, then re-export your profile</li>
+                  <li>Run it. <strong>D-pad Down</strong> moves to the next test, <strong>D-pad Up</strong> goes back, <strong>A</strong> re-zeros the current test, <strong>B</strong> records a reading</li>
+                  <li><strong>Test 1 — Port scan:</strong> push the robot and confirm the two ports that move are the ones named as your pods</li>
+                  <li><strong>Test 2 — Straight:</strong> push forward exactly 48" (two tiles), press B</li>
+                  <li><strong>Test 3 — Strafe, two pushes:</strong> push the robot's LEFT exactly 48", press B — then push its RIGHT exactly 48", press B. The DS reports GOOD, REVERSED, or a sign problem. If it says REVERSED, tick Reverse on that pod here and regenerate</li>
+                  <li><strong>Test 4 — Spin:</strong> rotate 10 turns clockwise about a fixed point, press B</li>
+                  <li><strong>Test 5 — Verify:</strong> type the four results into the <strong>Odometry</strong> tab, regenerate, run again, push a square and check the pose returns near 0,0</li>
+                  <li>Re-export your robot profile so PathPilot picks up the measured values</li>
                 </ol>
-                <p className="text-green-300 mt-2 text-xs">Push slowly and keep the robot square — the cross-axis drift readout tells you if you are skewing it.</p>
+                <p className="text-green-300 mt-2 text-xs">Push slowly and keep the robot square — the cross-axis drift readout tells you if you are skewing it. The strafe test needs both pushes; after the first the DS asks for the second.</p>
               </div>
             )}
             {codeOutputMode === 'teleop' && (
