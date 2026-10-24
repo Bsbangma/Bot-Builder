@@ -402,14 +402,19 @@ const FTCRobotConfigurator = () => {
   /**
    * Control schemes that can command a fixed velocity.
    *
-   * Triggers and sticks are deliberately absent. They are analogue, so under
-   * velocity they would scale the *target* — half trigger meaning half target
-   * rpm. That compiles and runs, but it is the wrong instrument for a shooter,
-   * which wants one repeatable speed rather than a speed the driver's thumb
-   * has to find again every cycle.
+   * Only the sticks are absent. An axis has no natural "on" — under velocity it
+   * would scale the *target*, half stick meaning half target rpm, which is the
+   * wrong instrument for a shooter that wants one repeatable speed.
+   *
+   * Triggers are included, but under velocity they are treated as buttons
+   * (pulled past halfway or not) rather than as the proportional input they
+   * are under power. The trigger pair is the default control, so excluding it
+   * meant the obvious first configuration could not reach velocity at all
+   * without first switching to Toggle — and anyone who then switched back to
+   * Hold for press-to-run had their velocity setting silently ignored.
    */
-  const VELOCITY_CAPABLE_CONTROLS = ['single', 'bumper_pair', 'dpad_updown',
-    'dpad_leftright', 'ab_buttons', 'xy_buttons'];
+  const VELOCITY_CAPABLE_CONTROLS = ['single', 'trigger_pair', 'bumper_pair',
+    'dpad_updown', 'dpad_leftright', 'ab_buttons', 'xy_buttons'];
 
   /**
    * The buttons each control scheme binds, forward direction first.
@@ -487,6 +492,22 @@ const FTCRobotConfigurator = () => {
     if (!c || c.mode !== 'velocity' || c.control === 'none') return false;
     if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control))) return false;
     return !velocityBlockedReason(m);
+  };
+
+  /**
+   * Why a motor the user set to velocity is nevertheless not being driven by
+   * velocity. Null when it is, or when velocity was never selected.
+   *
+   * isVelocityMotor answers yes/no; this says why not, so the UI can name the
+   * motor and the cause instead of leaving a stored setting silently ignored.
+   */
+  const velocityIgnoredReason = (m) => {
+    const c = motorControls[m.name];
+    if (!c || c.mode !== 'velocity') return null;
+    if (c.control === 'none') return 'its control is "Not directly controlled — macros only"';
+    if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control)))
+      return 'its control is a stick, and an axis has no fixed target to hold';
+    return velocityBlockedReason(m);
   };
 
   // Servo Database
@@ -805,7 +826,7 @@ const FTCRobotConfigurator = () => {
         return;
       }
       if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control))) {
-        warnings.push({ type: 'error', message: `Motor "${m.name}" is set to velocity control, but its control scheme is analogue. Choose a toggle, or buttons/bumpers/D-pad, or it will be driven by power instead.` });
+        warnings.push({ type: 'error', message: `Motor "${m.name}" is set to velocity control, but its control is a stick, which has no fixed target to hold. Choose buttons, bumpers, triggers or D-pad, or switch it to Toggle — until then it will be driven by power.` });
         return;
       }
       const v = Number(c.velocity) || 0;
@@ -2363,7 +2384,15 @@ ${sensors.map(s => {
         // Hold behavior
         switch (ctrl.control) {
           case 'trigger_pair':
-            code = `        // ${motor.name} - Trigger control
+            code = velMode
+              ? `        // ${motor.name} - Trigger control${unit}
+        // Under velocity the triggers are buttons, not a proportional input.
+        // A shooter wants one repeatable speed, not one that tracks how far
+        // the trigger happens to be pulled this time.
+        if (${gp}.right_trigger > 0.5) ${set(mag(''))}
+        else if (${gp}.left_trigger > 0.5) ${set(mag('-'))}
+        else ${set('0')}${tail}`
+              : `        // ${motor.name} - Trigger control
         ${motor.name}.setPower((${gp}.right_trigger - ${gp}.left_trigger) * ${power});`;
             break;
           case 'bumper_pair':
@@ -5233,8 +5262,9 @@ Make sure your code initializes the IMU with these orientations!
                                     <span className="text-xs text-yellow-500">Velocity unavailable — {blocked}.</span>
                                   )}
                                   {!blocked && !discrete && (
-                                    <span className="text-xs text-gray-500">
-                                      Velocity needs a discrete control — a toggle, or buttons/bumpers/D-pad.
+                                    <span className="text-xs text-yellow-500">
+                                      Velocity is not available on a stick — an axis has no fixed target to hold.
+                                      Pick buttons, bumpers, triggers or D-pad, or switch Behavior to Toggle.
                                     </span>
                                   )}
                                 </div>
@@ -7009,6 +7039,12 @@ Make sure your code initializes the IMU with these orientations!
                 {/* Status LED — drives the Blinkin from velocity at-speed state. */}
                 {(() => {
                   const velMotors = (auxMotors || []).filter(m => isVelocityMotor(m));
+                  // Set to velocity, but not actually being driven by it. Shown
+                  // here because "no motor uses velocity" is a baffling thing to
+                  // read right after setting one to velocity.
+                  const ignored = (auxMotors || [])
+                    .map(m => ({ m, why: velocityIgnoredReason(m) }))
+                    .filter(x => x.why);
                   const patternPicker = (value, setter, label) => (
                     <div>
                       <label className="block text-xs text-gray-400 mb-1">{label}</label>
@@ -7044,15 +7080,26 @@ Make sure your code initializes the IMU with these orientations!
 
                       {ledStatusEnabled && (
                         <>
-                          {velMotors.length === 0 ? (
+                          {velMotors.length === 0 && ignored.length === 0 && (
                             <div className="text-sm text-yellow-400 mb-3">
                               No motor uses velocity control yet, so there is nothing to report.
                               Set one to "Velocity" in the Controls tab.
                             </div>
-                          ) : (
+                          )}
+                          {velMotors.length > 0 && (
                             <div className="text-xs text-gray-400 mb-3">
                               Watching: {velMotors.map(m => m.name).join(', ')} — green only when
                               every one of them is at its target.
+                            </div>
+                          )}
+                          {ignored.length > 0 && (
+                            <div className="text-sm text-yellow-400 mb-3 space-y-1">
+                              {ignored.map(({ m, why }) => (
+                                <div key={m.id}>
+                                  <strong>{m.name}</strong> is set to velocity but is being driven by
+                                  power, because {why}. Fix that in the Controls tab and it will be watched.
+                                </div>
+                              ))}
                             </div>
                           )}
                           <div className="grid grid-cols-4 gap-2">
