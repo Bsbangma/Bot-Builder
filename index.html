@@ -199,6 +199,27 @@ const FTCRobotConfigurator = () => {
   const [aprilTagSize, setAprilTagSize] = React.useState(165); // mm
   const [targetTags, setTargetTags] = React.useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
 
+  // AprilTag clusters: several tags that mean one target. BIOBUZZ puts four on
+  // a single sticker under each hive cell, so seeing any one of them is enough
+  // to know where the cell opening is. A single tag only gives you the tag.
+  //
+  // IDs: the manual confirms R-opposite 0–3 and B-audience 38–41. The other two
+  // follow the pattern but should be checked against Figure 9-17.
+  const [clusters, setClusters] = React.useState([
+    { id: 1, name: 'R opposite', alliance: 'R', tagIds: [0, 1, 2, 3] },
+    { id: 2, name: 'R audience', alliance: 'R', tagIds: [4, 5, 6, 7] },
+    { id: 3, name: 'B audience', alliance: 'B', tagIds: [38, 39, 40, 41] },
+    { id: 4, name: 'B opposite', alliance: 'B', tagIds: [42, 43, 44, 45] }
+  ]);
+  // Where each of the four tags sits relative to the cell centre, in inches,
+  // in the camera's view: x lateral (+ right), z depth (+ further). Every cell
+  // uses the same sticker, so this is one measurement shared by all clusters.
+  // Zeros until measured — then any visible tag still finds the cluster, it
+  // just reports the tag's own position rather than the opening's.
+  const [clusterTagOffsets, setClusterTagOffsets] = React.useState([
+    { x: 0, z: 0 }, { x: 0, z: 0 }, { x: 0, z: 0 }, { x: 0, z: 0 }
+  ]);
+
   // Controller Configuration
   const [numControllers, setNumControllers] = React.useState(2);
   const [gamepad1Role, setGamepad1Role] = React.useState('driver');
@@ -671,6 +692,28 @@ const FTCRobotConfigurator = () => {
   const SERVO_STEPS = ['servo_position'];
   const VISION_STEPS = ['drive_to_tag'];
 
+  /**
+   * What a drive-to-tag step is aiming at. Steps saved before clusters existed
+   * carry only tagId; newer ones carry target = 'tag:<id>' or 'cluster:<id>'.
+   * Returns { kind, ids, name, javaIds } or null when the reference is dangling.
+   */
+  const CLUSTER_CONST = (c) => `CLUSTER_${String(c.name).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_IDS`;
+  const resolveTagTarget = (st) => {
+    const t = st.target || (st.tagId !== undefined ? `tag:${st.tagId}` : null);
+    if (!t) return null;
+    const [kind, rawId] = String(t).split(':');
+    if (kind === 'cluster') {
+      const c = (clusters || []).find(x => String(x.id) === rawId);
+      if (!c) return null;
+      const ids = (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n));
+      if (!ids.length) return null;
+      return { kind, ids, name: c.name, javaIds: CLUSTER_CONST(c), upright: true };
+    }
+    const id = Number(rawId);
+    if (Number.isNaN(id)) return null;
+    return { kind: 'tag', ids: [id], name: `tag ${id}`, javaIds: `new int[]{${id}}`, upright: false };
+  };
+
   // Steps that read or regulate against the encoder. On a motor without one
   // they do not merely underperform: RUN_TO_POSITION never arrives, and a
   // velocity wait sees zero forever and only ever exits on its timeout.
@@ -694,8 +737,10 @@ const FTCRobotConfigurator = () => {
       if (!(blinkinPatterns || []).some(p => p.name === st.ledPattern))
         return `LED pattern "${st.ledPattern}" is not defined`;
     }
-    if (VISION_STEPS.includes(st.type) && !hasLimelight)
-      return 'this robot has no Limelight';
+    if (VISION_STEPS.includes(st.type)) {
+      if (!hasLimelight) return 'this robot has no Limelight';
+      if (!resolveTagTarget(st)) return 'its target no longer exists — pick a tag or cluster';
+    }
     return null;
   };
   const stepIsRunnable = (st) => stepProblem(st) === null;
@@ -866,6 +911,27 @@ const FTCRobotConfigurator = () => {
         warnings.push({ type: 'warning', message: `Motor "${m.name}" targets ${Math.round(v)} ticks/sec, within 5% of its free speed. Under load it will not hold that, so leave headroom.` });
       }
     });
+
+    // Clusters. A tag in two clusters makes the generated code aim at whichever
+    // cluster's constant happens to be checked first — silently.
+    (() => {
+      const owner = {};
+      (clusters || []).forEach(c => {
+        const ids = (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n));
+        if (ids.length === 0) {
+          warnings.push({ type: 'warning', message: `Cluster "${c.name}" has no tag IDs, so a step aimed at it can never see anything.` });
+        }
+        ids.forEach(id => {
+          if (owner[id] && owner[id] !== c.name) {
+            warnings.push({ type: 'error', message: `Tag ${id} is in both cluster "${owner[id]}" and cluster "${c.name}". A tag can only belong to one cell.` });
+          } else owner[id] = c.name;
+        });
+        const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+        if (dupes.length) {
+          warnings.push({ type: 'error', message: `Cluster "${c.name}" lists tag ${dupes[0]} more than once.` });
+        }
+      });
+    })();
 
     // Status LED configured but unable to run.
     if (ledStatusEnabled) {
@@ -1044,7 +1110,7 @@ const FTCRobotConfigurator = () => {
       motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
       ledStatusEnabled, ledReadyPattern, ledSpinUpPattern, ledIdlePattern, ledDwellMs,
-      sensors, aprilTagSize, targetTags,
+      sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
@@ -1137,6 +1203,10 @@ const FTCRobotConfigurator = () => {
     setSensors(config.sensors || []);
     setAprilTagSize(numOr(config.aprilTagSize, 165));
     setTargetTags(config.targetTags || []);
+    // Configs saved before clusters existed keep the BIOBUZZ defaults rather
+    // than an empty list, so the Target dropdown never goes blank on load.
+    if (Array.isArray(config.clusters) && config.clusters.length) setClusters(config.clusters);
+    if (Array.isArray(config.clusterTagOffsets) && config.clusterTagOffsets.length === 4) setClusterTagOffsets(config.clusterTagOffsets);
     // Not numOr: zero controllers is not a configuration anyone means.
     setNumControllers(config.numControllers || 2);
     setGamepad1Role(config.gamepad1Role || 'driver');
@@ -1196,7 +1266,7 @@ const FTCRobotConfigurator = () => {
       motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
       ledStatusEnabled, ledReadyPattern, ledSpinUpPattern, ledIdlePattern, ledDwellMs,
-      sensors, aprilTagSize, targetTags,
+      sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
@@ -1518,6 +1588,13 @@ const FTCRobotConfigurator = () => {
         facing: limelightFacing, pipeline: 0,
         tagSizeMm: Number(aprilTagSize) || null
       } : { present: false },
+      // Multi-tag targets. PathPilot's drive-to-tag can aim at a cell by any
+      // visible member instead of stalling on one ID.
+      clusters: (clusters || []).map(c => ({
+        name: c.name, alliance: c.alliance,
+        tagIds: (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n))
+      })),
+      clusterTagOffsetsIn: (clusterTagOffsets || []).map(o => ({ x: Number(o.x) || 0, z: Number(o.z) || 0 })),
       blinkin: hasBlinkin ? { present: true, hardwareName: 'blinkin' } : { present: false },
       auxMotors: (auxMotors || []).map(mm => ({
         hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed,
@@ -2643,6 +2720,17 @@ ${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values 
     private static final double TAG_MAX_POWER = 0.45;
     private static final double TAG_ANGLE_TOLERANCE = 3.0;
     private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
+
+    // AprilTag clusters: several tags, one target. Any visible member locates
+    // the cell, and the step keeps driving on whichever one is in view instead
+    // of stalling because the one ID it wanted went behind a ball.
+${(clusters || []).map(c => `    private static final int[] ${CLUSTER_CONST(c)} = { ${(c.tagIds || []).map(Number).filter(n => !Number.isNaN(n)).join(', ')} };   // ${c.alliance === 'B' ? 'blue' : 'red'}, "${javaString(c.name)}"`).join('\n')}
+    // Where each tag sits relative to the cell opening, inches, in the camera's
+    // view (x lateral + right, z depth + further). Every cell uses the same
+    // sticker, so one set serves all clusters. Slot i pairs with ids[i].
+    private static final double[] CLUSTER_OFF_X_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.x) || 0).toFixed(2)).join(', ')} };
+    private static final double[] CLUSTER_OFF_Z_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.z) || 0).toFixed(2)).join(', ')} };
+    private static final double[] NO_OFFSETS = { 0, 0, 0, 0 };
 ` : ''}
 ${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.perpendicular.varName; })()) ? (() => {
   const p = podInfo();
@@ -3095,13 +3183,15 @@ ${isHold ?
                         break;
 `;
         break;
-      case 'drive_to_tag':
-        macroCode += `                        // Drive to AprilTag ${step.tagId}: ${step.distance} in away, offset ${step.offset} in
+      case 'drive_to_tag': {
+        // stepIsRunnable already guaranteed this resolves.
+        const tgt = resolveTagTarget(step);
+        macroCode += `                        // Drive to ${tgt.kind === 'cluster' ? 'cell cluster "' + tgt.name + '" (tags ' + tgt.ids.join(',') + ')' : 'AprilTag ' + tgt.ids[0]}: ${step.distance} in away, offset ${step.offset} in
                         if (!macroStepStarted) {
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
-                        if (stepTowardTag(${step.tagId}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
+                        if (stepTowardTarget(${tgt.javaIds}, ${tgt.kind === 'cluster' ? 'CLUSTER_OFF_X_IN, CLUSTER_OFF_Z_IN, true' : 'NO_OFFSETS, NO_OFFSETS, false'}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
                             macroStep++;
                             macroStepStarted = false;
                         } else if (macroTimer.seconds() >= TAG_SEEK_TIMEOUT) {
@@ -3114,6 +3204,7 @@ ${isHold ?
                         break;
 `;
         break;
+      }
       default:
         macroCode += `                        // Unknown action type: ${step.type}
                         macroStep++;
@@ -3454,20 +3545,61 @@ ${hasLimelight ? `
     }
 
     /**
-     * One iteration of driving toward a tag. Returns true once it is within
-     * tolerance. Non-blocking on purpose — a TeleOp loop that stalls stops
-     * reading the gamepad, and the driver loses the robot.
+     * Centre of a multi-tag target in camera space, inches, or null if no
+     * member is visible. x lateral (+ right), z depth.
+     *
+     * Each visible member is shifted by its own slot's offset so it reports the
+     * target's centre rather than its own, then the shifted positions are
+     * averaged. With all four in view the offsets cancel and this is just the
+     * sticker centre; with one in view it is that tag corrected toward the
+     * centre; either way the step gets the same point to drive at.
+     *
+     * requireUpright drops members whose roll is past 90 degrees. Hive cells
+     * pivot, and a flipped cell is not one you can score in — but a wall tag
+     * has no such state, so single-tag targets pass false.
+     */
+    private double[] seeTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright) {
+        if (limelight == null) return null;
+        LLResult result = limelight.getLatestResult();
+        if (result == null || !result.isValid()) return null;
+        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();
+        if (detections == null) return null;
+        double sx = 0, sz = 0;
+        int n = 0;
+        for (LLResultTypes.FiducialResult d : detections) {
+            int slot = -1;
+            for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }
+            if (slot < 0) continue;
+            Pose3D pose = d.getTargetPoseCameraSpace();
+            if (pose == null) continue;
+            if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;
+            double ox = slot < offXIn.length ? offXIn[slot] : 0;
+            double oz = slot < offZIn.length ? offZIn[slot] : 0;
+            sx += pose.getPosition().x * 39.3701 + ox;
+            sz += pose.getPosition().z * 39.3701 + oz;
+            n++;
+        }
+        if (n == 0) return null;
+        return new double[] { sx / n, sz / n };
+    }
+
+    /**
+     * One iteration of driving toward a target — a single tag or a cluster.
+     * Returns true once it is within tolerance. Non-blocking on purpose — a
+     * TeleOp loop that stalls stops reading the gamepad, and the driver loses
+     * the robot.
      *
      * offsetInches shifts the target sideways: negative left, positive right.
      */
-    private boolean stepTowardTag(int tagId, double targetInches, double offsetInches, double toleranceInches) {
-        Position p = seeTag(tagId);
+    private boolean stepTowardTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright,
+                                     double targetInches, double offsetInches, double toleranceInches) {
+        double[] p = seeTarget(ids, offXIn, offZIn, requireUpright);
         if (p == null) {
             stopDrive();
             return false;
         }
-        double xIn = p.x * 39.3701;
-        double zIn = p.z * 39.3701;
+        double xIn = p[0];
+        double zIn = p[1];
 
         double rangeError = zIn - targetInches;
         double lateralError = xIn - offsetInches;
@@ -5766,7 +5898,10 @@ Make sure your code initializes the IMU with these orientations!
             driveDistance: 12,
             drivePower: 0.5,
             targetHeading: 0,
-            // Drive to tag fields
+            // Drive to tag fields. A new step aims at the first cluster if any
+            // exist, else the first single tag — never a bare number.
+            target: (clusters || []).length ? `cluster:${clusters[0].id}`
+                  : ((targetTags || []).length ? `tag:${targetTags[0].tagId}` : 'tag:21'),
             tagId: 21,
             distance: 24,
             offset: 0,
@@ -5928,13 +6063,45 @@ Make sure your code initializes the IMU with these orientations!
               return (
                 <div className="grid grid-cols-4 gap-2 mt-2">
                   <div>
-                    <label className="block text-xs text-gray-400">Tag ID</label>
-                    <input
-                      type="number"
-                      value={step.tagId}
-                      onChange={(e) => updateStep(macro.id, step.id, 'tagId', parseInt(e.target.value))}
-                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
-                    />
+                    <label className="block text-xs text-gray-400">Target</label>
+                    {(() => {
+                      // Old steps stored only tagId; new ones store target.
+                      const current = step.target || (step.tagId !== undefined ? `tag:${step.tagId}` : '');
+                      const resolved = resolveTagTarget(step);
+                      // A hand-typed tag ID that is not in the Tags list still has
+                      // to appear, or an old macro's selection vanishes on load.
+                      const knownTag = (targetTags || []).some(t => `tag:${t.tagId}` === current);
+                      const orphanTag = current.startsWith('tag:') && !knownTag ? current : null;
+                      return (
+                        <>
+                          <select
+                            value={current}
+                            onChange={(e) => updateStep(macro.id, step.id, 'target', e.target.value)}
+                            className={`w-full bg-gray-700 border rounded px-2 py-1 text-white text-sm ${resolved ? 'border-gray-600' : 'border-red-500'}`}
+                          >
+                            {!current && <option value="">— pick a target —</option>}
+                            {(clusters || []).length > 0 && (
+                              <optgroup label="Hive cells (any tag of the four)">
+                                {clusters.map(c => (
+                                  <option key={`c${c.id}`} value={`cluster:${c.id}`}>
+                                    {c.name} — {c.alliance === 'B' ? 'blue' : 'red'}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                            <optgroup label="Single tags">
+                              {(targetTags || []).map(t => (
+                                <option key={`t${t.id}`} value={`tag:${t.tagId}`}>{t.name} (ID {t.tagId})</option>
+                              ))}
+                              {orphanTag && <option value={orphanTag}>ID {orphanTag.split(':')[1]} (not in Tags list)</option>}
+                            </optgroup>
+                          </select>
+                          {!resolved && current && (
+                            <span className="text-xs text-red-400">Target no longer exists.</span>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div>
                     <label className="block text-xs text-gray-400">Distance (in)</label>
@@ -7338,6 +7505,108 @@ Make sure your code initializes the IMU with these orientations!
                     </button>
                   </div>
                 ))}
+              </div>
+            </div>
+
+            {/* Clusters: several tags that mean one target. */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <div className="flex justify-between items-center mb-3">
+                <h4 className="text-lg font-semibold text-blue-400">Hive Cell Clusters</h4>
+                <button
+                  onClick={() => {
+                    const newId = clusters.length > 0 ? Math.max(...clusters.map(c => c.id)) + 1 : 1;
+                    setClusters([...clusters, { id: newId, name: `cluster${newId}`, alliance: 'R', tagIds: ['', '', '', ''] }]);
+                  }}
+                  className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+                >
+                  + Add Cluster
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mb-3">
+                BIOBUZZ puts four tags on one sticker under each hive cell. A Drive to AprilTag step
+                aimed at a cluster keeps going on whichever of the four it can see, instead of stopping
+                because one ID went out of view. The pre-filled IDs for the two "opposite" cells follow
+                the manual's pattern — confirm them against Figure 9-17.
+              </p>
+
+              <div className="space-y-2">
+                {clusters.map(c => (
+                  <div key={c.id} className="flex gap-2 items-center bg-gray-600 p-2 rounded">
+                    <input
+                      type="text"
+                      value={c.name}
+                      onChange={(e) => setClusters(clusters.map(x => x.id === c.id ? {...x, name: e.target.value} : x))}
+                      className="w-28 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      placeholder="Name"
+                    />
+                    <select
+                      value={c.alliance}
+                      onChange={(e) => setClusters(clusters.map(x => x.id === c.id ? {...x, alliance: e.target.value} : x))}
+                      className="bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                    >
+                      <option value="R">Red</option>
+                      <option value="B">Blue</option>
+                    </select>
+                    {[0, 1, 2, 3].map(i => (
+                      <input
+                        key={i}
+                        type="number"
+                        value={c.tagIds[i] !== undefined ? c.tagIds[i] : ''}
+                        onChange={(e) => {
+                          const v = e.target.value === '' ? '' : parseInt(e.target.value);
+                          setClusters(clusters.map(x => {
+                            if (x.id !== c.id) return x;
+                            const ids = [...(x.tagIds || ['', '', '', ''])];
+                            ids[i] = v;
+                            return {...x, tagIds: ids};
+                          }));
+                        }}
+                        className="w-14 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        placeholder={`#${i + 1}`}
+                      />
+                    ))}
+                    <button
+                      onClick={() => setClusters(clusters.filter(x => x.id !== c.id))}
+                      className="text-red-400 hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4">
+                <h5 className="text-sm font-semibold text-gray-300 mb-1">Tag positions on the sticker</h5>
+                <p className="text-xs text-gray-400 mb-2">
+                  Inches from each tag's centre to the cell opening, as the camera sees it: x is sideways
+                  (+ right), z is depth (+ further away). Same sticker on every cell, so one set covers all
+                  four clusters. Slot 1 pairs with the first ID above, slot 2 with the second, and so on.
+                  Leave at 0 until measured — any visible tag still finds the cluster, it just aims at
+                  that tag instead of the opening.
+                </p>
+                <div className="grid grid-cols-4 gap-2">
+                  {[0, 1, 2, 3].map(i => (
+                    <div key={i} className="bg-gray-600 p-2 rounded">
+                      <div className="text-xs text-gray-400 mb-1">Slot {i + 1}</div>
+                      <div className="flex gap-1 items-center">
+                        <span className="text-xs text-gray-500">x</span>
+                        <input
+                          type="number" step="0.25"
+                          value={clusterTagOffsets[i]?.x ?? 0}
+                          onChange={(e) => setClusterTagOffsets(clusterTagOffsets.map((o, j) => j === i ? {...o, x: parseFloat(e.target.value) || 0} : o))}
+                          className="w-full bg-gray-700 border border-gray-500 rounded px-1 py-1 text-white text-sm"
+                        />
+                        <span className="text-xs text-gray-500">z</span>
+                        <input
+                          type="number" step="0.25"
+                          value={clusterTagOffsets[i]?.z ?? 0}
+                          onChange={(e) => setClusterTagOffsets(clusterTagOffsets.map((o, j) => j === i ? {...o, z: parseFloat(e.target.value) || 0} : o))}
+                          className="w-full bg-gray-700 border border-gray-500 rounded px-1 py-1 text-white text-sm"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
