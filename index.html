@@ -39,6 +39,21 @@ const javaClassName = (name, suffix) => {
   return base + (suffix || '');
 };
 
+/**
+ * Escape a configured name for use inside a Java string literal.
+ *
+ * Hardware names cannot be sanitised the way variable names are — they have to
+ * match the Driver Station configuration exactly — so the only safe thing is to
+ * escape them. A robot called My "Best" Bot otherwise closes the literal early
+ * and the file does not compile, with the error pointing at a telemetry line
+ * rather than at the name that caused it.
+ */
+const javaString = (s) => String(s === null || s === undefined ? '' : s)
+  .replace(/\\/g, '\\\\')
+  .replace(/"/g, '\\"')
+  .replace(/\r/g, '\\r')
+  .replace(/\n/g, '\\n');
+
 // For a motor or servo used as a Java variable. Keeps the name recognisable
 // while guaranteeing it compiles.
 const javaVarName = (name) => {
@@ -166,12 +181,44 @@ const FTCRobotConfigurator = () => {
     { id: 1, name: 'default', pattern: 'solid_green', description: 'Default state' }
   ]);
 
+  // Status LED. A velocity-controlled shooter gives the driver nothing to hear
+  // or see — the motor sounds the same at 1800 and 2000 ticks/sec. These drive
+  // the Blinkin from at-speed state so the driver knows when it is safe to fire.
+  const [ledStatusEnabled, setLedStatusEnabled] = React.useState(false);
+  const [ledReadyPattern, setLedReadyPattern] = React.useState('');
+  const [ledSpinUpPattern, setLedSpinUpPattern] = React.useState('');
+  const [ledIdlePattern, setLedIdlePattern] = React.useState('');
+  // How long velocity must stay inside the tolerance band before the LED calls
+  // it ready. Without it the LED strobes as the PID hunts around the target.
+  const [ledDwellMs, setLedDwellMs] = React.useState(200);
+
   // Sensors Configuration
   const [sensors, setSensors] = React.useState([]);
 
   // AprilTag Configuration
   const [aprilTagSize, setAprilTagSize] = React.useState(165); // mm
   const [targetTags, setTargetTags] = React.useState([{ id: 1, tagId: 21, name: 'Scoring Station' }]);
+
+  // AprilTag clusters: several tags that mean one target. BIOBUZZ puts four on
+  // a single sticker under each hive cell, so seeing any one of them is enough
+  // to know where the cell opening is. A single tag only gives you the tag.
+  //
+  // IDs: the manual confirms R-opposite 0–3 and B-audience 38–41. The other two
+  // follow the pattern but should be checked against Figure 9-17.
+  const [clusters, setClusters] = React.useState([
+    { id: 1, name: 'R opposite', alliance: 'R', tagIds: [0, 1, 2, 3] },
+    { id: 2, name: 'R audience', alliance: 'R', tagIds: [4, 5, 6, 7] },
+    { id: 3, name: 'B audience', alliance: 'B', tagIds: [38, 39, 40, 41] },
+    { id: 4, name: 'B opposite', alliance: 'B', tagIds: [42, 43, 44, 45] }
+  ]);
+  // Where each of the four tags sits relative to the cell centre, in inches,
+  // in the camera's view: x lateral (+ right), z depth (+ further). Every cell
+  // uses the same sticker, so this is one measurement shared by all clusters.
+  // Zeros until measured — then any visible tag still finds the cluster, it
+  // just reports the tag's own position rather than the opening's.
+  const [clusterTagOffsets, setClusterTagOffsets] = React.useState([
+    { x: 0, z: 0 }, { x: 0, z: 0 }, { x: 0, z: 0 }, { x: 0, z: 0 }
+  ]);
 
   // Controller Configuration
   const [numControllers, setNumControllers] = React.useState(2);
@@ -215,11 +262,36 @@ const FTCRobotConfigurator = () => {
   const [editingMacroId, setEditingMacroId] = React.useState(null);
   const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
 
-  // Load saved configs on mount
+  // Could not read the saved-config store on startup. Surfaced in the Save/Load
+  // UI rather than swallowed, so a team whose configs vanished knows why.
+  const [storageError, setStorageError] = React.useState(null);
+
+  // Load saved configs on mount.
+  //
+  // Everything here can fail: localStorage throws outright in a private window
+  // or with site data blocked, and a half-written or hand-edited value fails to
+  // parse. An uncaught throw here happens during the mount effect, so the whole
+  // configurator fails to render — a blank page, with no clue that one bad
+  // string in browser storage is the cause. Recover to an empty list instead.
   React.useEffect(() => {
-    const saved = localStorage.getItem('ftc_robot_configs');
-    if (saved) {
-      setSavedConfigs(JSON.parse(saved));
+    let saved = null;
+    try {
+      saved = localStorage.getItem('ftc_robot_configs');
+    } catch (e) {
+      setStorageError('Browser storage is unavailable, so saved configurations could not be loaded. ' +
+        'This usually means private browsing or blocked site data. Export to a file instead.');
+      return;
+    }
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved);
+      // A non-array would break every consumer below, which all assume .filter
+      // and .map. Treat a wrong shape the same as corrupt.
+      if (!Array.isArray(parsed)) throw new Error('not an array');
+      setSavedConfigs(parsed);
+    } catch (e) {
+      setStorageError('Saved configurations could not be read and were skipped. The stored data is ' +
+        'corrupt or from an incompatible version. Saving a configuration will overwrite it.');
     }
   }, []);
 
@@ -335,6 +407,148 @@ const FTCRobotConfigurator = () => {
       rpm: Math.round(BARE_MOTOR_RPM / ratio),
       ticksPerRev: Math.round(BARE_MOTOR_CPR * ratio * 10) / 10
     };
+  };
+
+  /**
+   * Whether this motor has a usable encoder.
+   *
+   * Two things have to be true: the motor type has one, and the cable is
+   * plugged in. The database knows the first; only the user knows the second,
+   * which is what the per-motor flag records. Missing means true — every config
+   * saved before the flag existed was generated as if encoders were present.
+   */
+  const hasEncoder = (m) => {
+    if (!m) return false;
+    const s = motorSpecs(m) || {};
+    if (!(Number(s.ticksPerRev) > 0)) return false;
+    return m.hasEncoder === undefined ? true : !!m.hasEncoder;
+  };
+
+  /**
+   * Free-running speed in encoder ticks per second — the unit setVelocity takes.
+   * Zero when the motor has no usable encoder, which is how velocity mode is
+   * refused.
+   */
+  const motorMaxTicksPerSec = (m) => {
+    if (!hasEncoder(m)) return 0;
+    const s = motorSpecs(m) || {};
+    const rpm = Number(s.rpm) || 0;
+    const tpr = Number(s.ticksPerRev) || 0;
+    return (rpm * tpr) / 60;
+  };
+
+  /**
+   * Control schemes that can command a fixed velocity.
+   *
+   * Only the sticks are absent. An axis has no natural "on" — under velocity it
+   * would scale the *target*, half stick meaning half target rpm, which is the
+   * wrong instrument for a shooter that wants one repeatable speed.
+   *
+   * Triggers are included, but under velocity they are treated as buttons
+   * (pulled past halfway or not) rather than as the proportional input they
+   * are under power. The trigger pair is the default control, so excluding it
+   * meant the obvious first configuration could not reach velocity at all
+   * without first switching to Toggle — and anyone who then switched back to
+   * Hold for press-to-run had their velocity setting silently ignored.
+   */
+  const VELOCITY_CAPABLE_CONTROLS = ['single', 'trigger_pair', 'bumper_pair',
+    'dpad_updown', 'dpad_leftright', 'ab_buttons', 'xy_buttons'];
+
+  /**
+   * The buttons each control scheme binds, forward direction first.
+   *
+   * Stick schemes bind none — an axis is not a button, and nothing collides
+   * with it. One table, because the generator and the conflict check have to
+   * agree about which buttons a control actually reads; if they drift, the
+   * warning either cries wolf or misses a real double-binding.
+   */
+  const CONTROL_BUTTONS = {
+    trigger_pair:   ['right_trigger', 'left_trigger'],
+    bumper_pair:    ['right_bumper', 'left_bumper'],
+    dpad_updown:    ['dpad_up', 'dpad_down'],
+    dpad_leftright: ['dpad_right', 'dpad_left'],
+    ab_buttons:     ['a', 'b'],
+    xy_buttons:     ['y', 'x'],
+    left_stick_y:   [],
+    right_stick_y:  [],
+    none:           []
+  };
+
+  /**
+   * Which button toggles a motor on and off.
+   *
+   * A toggle only ever needs one button, so it takes the forward button of
+   * whichever scheme was chosen. This used to fall back to A for every scheme
+   * except "single" and "trigger pair", so picking D-pad Up/Down with Toggle
+   * silently bound A — the D-pad did nothing and nobody could see why.
+   */
+  const toggleButtonFor = (ctrl) => {
+    if (!ctrl) return 'a';
+    if (ctrl.control === 'single') return ctrl.singleButton || 'dpad_up';
+    const list = CONTROL_BUTTONS[ctrl.control];
+    // Stick schemes have no button to offer; A is the long-standing fallback.
+    return (list && list.length) ? list[0] : 'a';
+  };
+
+  /** Every button a motor control binds, for conflict checking. */
+  const motorControlButtons = (ctrl) => {
+    if (!ctrl || ctrl.control === 'none') return [];
+    if (ctrl.behavior === 'toggle') return [toggleButtonFor(ctrl)];
+    if (ctrl.control === 'single') return [ctrl.singleButton || 'dpad_up'];
+    return CONTROL_BUTTONS[ctrl.control] || [];
+  };
+
+  /**
+   * Whether this motor can be commanded by velocity, and if not, why.
+   * Returns null when it can.
+   *
+   * Two ways to fail. No encoder is obvious. The second is not: an odometry pod
+   * plugged into a motor's encoder port means getVelocity() reads the pod, not
+   * the motor, so the PID would regulate against a free-spinning dead wheel.
+   */
+  const velocityBlockedReason = (m) => {
+    if (!hasEncoder(m)) {
+      const typeHasOne = Number((motorSpecs(m) || {}).ticksPerRev) > 0;
+      return typeHasOne
+        ? 'its encoder is marked as not connected in the Motors tab'
+        : 'this motor type has no encoder';
+    }
+    const onPod = (p) => p && (p.hub || 'control') === (m.hub || 'control')
+      && Number(p.port) === Number(m.port);
+    if (hasOdometry && (onPod(odo1Port) || onPod(odo2Port))) {
+      return 'an odometry pod occupies this port, so getVelocity() reads the pod rather than the motor';
+    }
+    return null;
+  };
+
+  /**
+   * Whether this motor is actually commanded by velocity in the generated
+   * TeleOp. One definition, because the codegen, the field declarations, the
+   * at-speed tracker, the telemetry and the status LED all have to agree about
+   * which motors these are — and a motor in half of those lists is a motor
+   * whose target field is written but never declared.
+   */
+  const isVelocityMotor = (m) => {
+    const c = motorControls[m.name];
+    if (!c || c.mode !== 'velocity' || c.control === 'none') return false;
+    if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control))) return false;
+    return !velocityBlockedReason(m);
+  };
+
+  /**
+   * Why a motor the user set to velocity is nevertheless not being driven by
+   * velocity. Null when it is, or when velocity was never selected.
+   *
+   * isVelocityMotor answers yes/no; this says why not, so the UI can name the
+   * motor and the cause instead of leaving a stored setting silently ignored.
+   */
+  const velocityIgnoredReason = (m) => {
+    const c = motorControls[m.name];
+    if (!c || c.mode !== 'velocity') return null;
+    if (c.control === 'none') return 'its control is "Not directly controlled — macros only"';
+    if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control)))
+      return 'its control is a stick, and an axis has no fixed target to hold';
+    return velocityBlockedReason(m);
   };
 
   // Servo Database
@@ -478,11 +692,40 @@ const FTCRobotConfigurator = () => {
   const SERVO_STEPS = ['servo_position'];
   const VISION_STEPS = ['drive_to_tag'];
 
+  /**
+   * What a drive-to-tag step is aiming at. Steps saved before clusters existed
+   * carry only tagId; newer ones carry target = 'tag:<id>' or 'cluster:<id>'.
+   * Returns { kind, ids, name, javaIds } or null when the reference is dangling.
+   */
+  const CLUSTER_CONST = (c) => `CLUSTER_${String(c.name).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_IDS`;
+  const resolveTagTarget = (st) => {
+    const t = st.target || (st.tagId !== undefined ? `tag:${st.tagId}` : null);
+    if (!t) return null;
+    const [kind, rawId] = String(t).split(':');
+    if (kind === 'cluster') {
+      const c = (clusters || []).find(x => String(x.id) === rawId);
+      if (!c) return null;
+      const ids = (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n));
+      if (!ids.length) return null;
+      return { kind, ids, name: c.name, javaIds: CLUSTER_CONST(c), upright: true };
+    }
+    const id = Number(rawId);
+    if (Number.isNaN(id)) return null;
+    return { kind: 'tag', ids: [id], name: `tag ${id}`, javaIds: `new int[]{${id}}`, upright: false };
+  };
+
+  // Steps that read or regulate against the encoder. On a motor without one
+  // they do not merely underperform: RUN_TO_POSITION never arrives, and a
+  // velocity wait sees zero forever and only ever exits on its timeout.
+  const ENCODER_STEPS = ['motor_position', 'motor_until_velocity', 'wait_velocity'];
+
   const stepProblem = (st) => {
     if (MOTOR_STEPS.includes(st.type)) {
       if (!st.motorName) return 'no motor selected';
-      if (!(auxMotors || []).some(m => m.name === st.motorName))
-        return `motor "${st.motorName}" is not configured on this robot`;
+      const m = (auxMotors || []).find(x => x.name === st.motorName);
+      if (!m) return `motor "${st.motorName}" is not configured on this robot`;
+      if (ENCODER_STEPS.includes(st.type) && !hasEncoder(m))
+        return `motor "${st.motorName}" has no encoder connected, and this step needs one`;
     }
     if (SERVO_STEPS.includes(st.type)) {
       if (!st.servoName) return 'no servo selected';
@@ -494,8 +737,10 @@ const FTCRobotConfigurator = () => {
       if (!(blinkinPatterns || []).some(p => p.name === st.ledPattern))
         return `LED pattern "${st.ledPattern}" is not defined`;
     }
-    if (VISION_STEPS.includes(st.type) && !hasLimelight)
-      return 'this robot has no Limelight';
+    if (VISION_STEPS.includes(st.type)) {
+      if (!hasLimelight) return 'this robot has no Limelight';
+      if (!resolveTagTarget(st)) return 'its target no longer exists — pick a tag or cluster';
+    }
     return null;
   };
   const stepIsRunnable = (st) => stepProblem(st) === null;
@@ -641,6 +886,88 @@ const FTCRobotConfigurator = () => {
       }
     })();
 
+    // Velocity mode asked for but not delivered. Silence here would mean the
+    // generated code quietly falls back to power while the UI still reads
+    // "velocity" — the motor spins, just not at the speed anyone chose.
+    (auxMotors || []).forEach(m => {
+      const c = motorControls[m.name];
+      if (!c || c.mode !== 'velocity' || c.control === 'none') return;
+      const blocked = velocityBlockedReason(m);
+      if (blocked) {
+        warnings.push({ type: 'error', message: `Motor "${m.name}" is set to velocity control, but ${blocked}. It will be driven by power instead.` });
+        return;
+      }
+      if (!(c.behavior === 'toggle' || VELOCITY_CAPABLE_CONTROLS.includes(c.control))) {
+        warnings.push({ type: 'error', message: `Motor "${m.name}" is set to velocity control, but its control is a stick, which has no fixed target to hold. Choose buttons, bumpers, triggers or D-pad, or switch it to Toggle — until then it will be driven by power.` });
+        return;
+      }
+      const v = Number(c.velocity) || 0;
+      const max = motorMaxTicksPerSec(m);
+      if (v <= 0) {
+        warnings.push({ type: 'warning', message: `Motor "${m.name}" has a target velocity of 0, so it will never spin.` });
+      } else if (v > max) {
+        warnings.push({ type: 'warning', message: `Motor "${m.name}" targets ${Math.round(v)} ticks/sec but free-runs at about ${Math.round(max)}. It will never reach the target, so an at-speed LED would never turn green.` });
+      } else if (v > max * 0.95) {
+        warnings.push({ type: 'warning', message: `Motor "${m.name}" targets ${Math.round(v)} ticks/sec, within 5% of its free speed. Under load it will not hold that, so leave headroom.` });
+      }
+    });
+
+    // Servo positions outside 0–1. setPosition() silently clamps on the robot,
+    // so position1 = 30 (a typo for 0.30) generates clean and slams the servo
+    // to full travel with nothing in the config that looks wrong.
+    (() => {
+      const bad = (v) => v !== undefined && v !== null && v !== '' && !(Number(v) >= 0 && Number(v) <= 1);
+      Object.keys(servoControls || {}).forEach(name => {
+        const c = servoControls[name];
+        if (!c) return;
+        if (!(servos || []).some(s => s.name === name)) return;
+        if (bad(c.position1)) warnings.push({ type: 'error', message: `Servo "${name}" position 1 is ${c.position1}. Positions are 0 to 1 — the robot will clamp this to ${Number(c.position1) > 1 ? 1 : 0} and the servo will go to full travel.` });
+        if (bad(c.position2)) warnings.push({ type: 'error', message: `Servo "${name}" position 2 is ${c.position2}. Positions are 0 to 1 — the robot will clamp this to ${Number(c.position2) > 1 ? 1 : 0} and the servo will go to full travel.` });
+      });
+      (macros || []).forEach(m => (m.steps || []).forEach((st, i) => {
+        if (st.type === 'servo_position' && bad(st.servoPosition)) {
+          warnings.push({ type: 'error', message: `Macro "${m.name}" step ${i + 1} sets servo "${st.servoName}" to ${st.servoPosition}. Positions are 0 to 1 — the robot will clamp it.` });
+        }
+      }));
+    })();
+
+    // Clusters. A tag in two clusters makes the generated code aim at whichever
+    // cluster's constant happens to be checked first — silently.
+    (() => {
+      const owner = {};
+      (clusters || []).forEach(c => {
+        const ids = (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n));
+        if (ids.length === 0) {
+          warnings.push({ type: 'warning', message: `Cluster "${c.name}" has no tag IDs, so a step aimed at it can never see anything.` });
+        }
+        ids.forEach(id => {
+          if (owner[id] && owner[id] !== c.name) {
+            warnings.push({ type: 'error', message: `Tag ${id} is in both cluster "${owner[id]}" and cluster "${c.name}". A tag can only belong to one cell.` });
+          } else owner[id] = c.name;
+        });
+        const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
+        if (dupes.length) {
+          warnings.push({ type: 'error', message: `Cluster "${c.name}" lists tag ${dupes[0]} more than once.` });
+        }
+      });
+    })();
+
+    // Status LED configured but unable to run.
+    if (ledStatusEnabled) {
+      if (!hasBlinkin) {
+        warnings.push({ type: 'error', message: 'The status LED is enabled but this robot has no Blinkin. Add one in the Blinkin tab, or turn the status LED off.' });
+      } else if (!(auxMotors || []).some(m => isVelocityMotor(m))) {
+        warnings.push({ type: 'warning', message: 'The status LED is enabled but no motor uses velocity control, so it has nothing to report. It will not be generated.' });
+      } else if (!ledReadyPattern || !ledSpinUpPattern || !ledIdlePattern) {
+        warnings.push({ type: 'error', message: 'The status LED needs a pattern chosen for all three states. It will not be generated until then.' });
+      }
+      [ledReadyPattern, ledSpinUpPattern, ledIdlePattern].forEach(p => {
+        if (p && !(blinkinPatterns || []).some(bp => bp.name === p)) {
+          warnings.push({ type: 'error', message: `The status LED refers to pattern "${p}", which no longer exists. Pick another in the Blinkin tab.` });
+        }
+      });
+    }
+
     // A control bound to gamepad2 on a one-controller robot never responds.
     if (numControllers === 1) {
       const stray = [];
@@ -686,108 +1013,113 @@ const FTCRobotConfigurator = () => {
 
     // Buttons assigned to more than one thing. The generated code reads them in
     // every place they appear, so one press fires all of them.
-    //
-    // The SDK exposes the PS-style names as synonyms for the Xbox ones: `options`
-    // IS `start` and `share` IS `back` — one physical button, two fields set from
-    // the same HID bit. Two controls sitting on "Options" and "Start" look
-    // distinct in this UI and are the same button on the hardware, so the key is
-    // canonicalised before comparison. Without that the collision generates clean
-    // and is close to undiagnosable from the driver's seat: on 2026-11-03 a
-    // robot-oriented toggle on Options was cancelled by a reset-heading on Start
-    // one loop later, every press, and the telemetry never showed it.
     (() => {
+      const claims = [];
+      const BUTTON_LABELS = {
+        a: 'A', b: 'B', x: 'X', y: 'Y',
+        dpad_up: 'D-pad Up', dpad_down: 'D-pad Down',
+        dpad_left: 'D-pad Left', dpad_right: 'D-pad Right',
+        left_bumper: 'Left Bumper', right_bumper: 'Right Bumper',
+        left_trigger: 'Left Trigger', right_trigger: 'Right Trigger',
+        left_stick_button: 'Left Stick Click', right_stick_button: 'Right Stick Click',
+        options: 'Options', start: 'Start', back: 'Back'
+      };
+      const label = (v) => BUTTON_LABELS[v] || v;
+
+      // The SDK's PS-style names are aliases of the Xbox ones: `options` IS
+      // `start`, `share` IS `back` — one physical button, two fields set from
+      // the same bit. Two controls on "Options" and "Start" look distinct in
+      // this UI and are the same button on the hardware. Compare on the
+      // canonical name, or the collision generates clean and is close to
+      // undiagnosable from the driver's seat: a toggle on Options cancelled by
+      // a reset on Start, every press, with nothing in telemetry to say why.
       const canon = (b) => (b === 'options' ? 'start' : (b === 'share' ? 'back' : b));
       const aliased = (b) => b === 'options' || b === 'share';
 
-      // Mirrors driverGamepad/operatorGamepad in the generator. driverPad() alone
-      // ignores numControllers, so on a one-controller robot whose gamepad1 is
-      // the operator it returned gamepad2 while the generator emitted gamepad1 —
-      // claims were then compared on a pad the code never reads.
+      // Must mirror driverGamepad in generateCompleteTeleOp. driverPad() alone
+      // ignores numControllers, so a one-controller robot whose saved role is
+      // "operator" had its claims checked on gamepad2 while the generator
+      // emitted gamepad1 — a pad the code never reads.
       const dPad = numControllers === 1 ? 'gamepad1' : driverPad();
-      const oPad = numControllers === 1
-        ? 'gamepad1'
-        : (gamepad1Role === 'operator' ? 'gamepad1' : 'gamepad2');
 
-      const claims = [];
-
-      // Macro cancel is hardcoded on START and claims it unconditionally. It was
-      // invisible to this check, so anything else on Start or Options collided
-      // with it silently.
+      // Macro cancel is hardcoded to START on every gamepad, so it is a claim
+      // like any other even though no setting produces it. Without this the
+      // conflict check cannot see the one collision the generator builds in.
       if ((macros || []).length > 0) {
         claims.push(['start', 'macro cancel', 'gamepad1']);
-        if (numControllers !== 1) claims.push(['start', 'macro cancel', 'gamepad2']);
+        if (numControllers === 2) claims.push(['start', 'macro cancel', 'gamepad2']);
       }
-
       if (resetHeadingButton && resetHeadingButton !== 'none') claims.push([resetHeadingButton, 'reset heading', dPad]);
       if (slowModeButton && slowModeButton !== 'none') claims.push([slowModeButton, 'slow mode', dPad]);
       if (robotOrientedButton && robotOrientedButton !== 'none') claims.push([robotOrientedButton, 'robot-oriented toggle', dPad]);
-
       (macros || []).forEach(m => {
         // PathPilot-only macros claim no button, so they cannot collide.
         if (m.triggerType === 'button' || m.triggerType === 'combo')
           claims.push([m.triggerButton, `macro "${m.name}"`, m.triggerController, 'macro']);
       });
 
-      Object.keys(servoControls || {}).forEach(name => {
-        const c = servoControls[name];
-        if (c && c.button) claims.push([c.button, `servo "${name}"`, c.controller]);
-      });
-
-      // Motor controls were missing from this list entirely, so a motor button
-      // could collide with anything and nothing said so. Each control claims
-      // whichever buttons generateMotorControlCode actually emits for it — the
-      // stick axes and the hold-mode trigger pair claim none.
-      const latchedByMacro = (name) => (macros || []).some(m =>
-        (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
-      (auxMotors || []).forEach(mt => {
-        const c = motorControls[mt.name] || {
-          controller: oPad,
-          control: latchedByMacro(mt.name) ? 'none' : 'trigger_pair',
+      // Motor controls. Walk the motors rather than the motorControls map so a
+      // motor left on its defaults is included — it still binds the default
+      // trigger pair in the generated code, and two of those on one pad is the
+      // easiest conflict in the whole tool to create without noticing.
+      const defaultPad = numControllers === 1 ? 'gamepad1'
+        : (gamepad1Role === 'operator' ? 'gamepad1' : 'gamepad2');
+      const macroLatches = (name) => (macros || [])
+        .filter(mm => mm.triggerType !== 'pathpilot')
+        .some(mm => (mm.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
+      (auxMotors || []).forEach(m => {
+        const c = motorControls[m.name] || {
+          controller: defaultPad,
+          control: macroLatches(m.name) ? 'none' : 'trigger_pair',
           behavior: 'hold'
         };
-        if (c.control === 'none') return;
-        const pad = c.controller || oPad;
-        let btns;
-        if (c.behavior === 'toggle') {
-          // A toggle binds one button, and for trigger_pair that button is the
-          // right bumper rather than a trigger.
-          btns = [c.control === 'single' ? (c.singleButton || 'dpad_up')
-                : c.control === 'trigger_pair' ? 'right_bumper' : 'a'];
-        } else {
-          btns = ({
-            bumper_pair: ['right_bumper', 'left_bumper'],
-            dpad_updown: ['dpad_up', 'dpad_down'],
-            dpad_leftright: ['dpad_left', 'dpad_right'],
-            ab_buttons: ['a', 'b'],
-            xy_buttons: ['y', 'x'],
-            single: [c.singleButton || 'dpad_up']
-          })[c.control] || [];
-        }
-        btns.forEach(b => claims.push([b, `motor "${mt.name}"`, pad]));
+        motorControlButtons(c).forEach(b =>
+          claims.push([b, `motor "${m.name}"`, c.controller || defaultPad]));
       });
 
-      const seen = {};
+      Object.keys(servoControls || {}).forEach(name => {
+        const c = servoControls[name];
+        if (!c) return;
+        if (c.button) claims.push([c.button, `servo "${name}"`, c.controller]);
+        // A continuous servo can bind a second button for the other direction.
+        if (c.reverseButton && c.reverseButton !== 'none')
+          claims.push([c.reverseButton, `servo "${name}" (reverse)`, c.controller]);
+      });
+      // Group by button before reporting, so three things on one button is one
+      // warning naming all three rather than two warnings naming the first twice.
+      const byButton = {};
       claims.forEach(([btn, who, pad, kind]) => {
-        if (!btn) return;
-        const p = pad || 'gamepad1';
-        const key = p + ':' + canon(btn);
-        const prior = seen[key];
-        if (!prior) { seen[key] = { who, btn, kind }; return; }
+        if (!btn || btn === 'none') return;
+        const key = (pad || 'gamepad1') + ':' + canon(btn);
+        const g = (byButton[key] = byButton[key] || { pad: pad || 'gamepad1', entries: [] });
+        g.entries.push({ who, btn, kind });
+      });
+      Object.values(byButton).forEach(({ pad, entries }) => {
+        // The same control listed twice is not a conflict with itself.
+        const seen = new Set();
+        const uniq = entries.filter(e => !seen.has(e.who) && seen.add(e.who));
+        if (uniq.length < 2) return;
 
-        // Two names for one button is an error: it generates clean and cannot be
-        // diagnosed from the driver's seat. Two macros on one button is also an
-        // error — the trigger block assigns activeMacro in order, so the later
-        // one always wins and the earlier can never run.
-        const alias = aliased(btn) !== aliased(prior.btn);
-        const bothMacro = kind === 'macro' && prior.kind === 'macro';
-        warnings.push({
-          type: (alias || bothMacro) ? 'error' : 'warning',
-          message: alias
-            ? `${p} ${btn} and ${prior.btn} are the SAME physical button — the SDK gives one button both names. `
-              + `${prior.who} and ${who} both fire on every press. Move one of them to a different button.`
-            : `${p} ${btn} is used by both ${prior.who} and ${who} — one press triggers both.`
-              + (bothMacro ? ' Only the later macro will ever run; the earlier one can never fire.' : '')
-        });
+        // Two names for one button is an error, not a warning: it looks like
+        // two bindings in the UI and generates clean. Two macros on one button
+        // is also an error — the trigger block assigns activeMacro in order, so
+        // the later one always wins and the earlier can never run at all.
+        const names = [...new Set(uniq.map(e => e.btn))];
+        const alias = names.length > 1 && names.some(aliased) && names.some(n => !aliased(n));
+        const macroCount = uniq.filter(e => e.kind === 'macro').length;
+        const bothMacro = macroCount >= 2;
+
+        const whos = uniq.map(e => e.who);
+        const last = whos.pop();
+        let message;
+        if (alias) {
+          message = `${pad} ${names.map(label).join(' and ')} are the SAME physical button — the SDK gives one button both names. `
+            + `${whos.join(', ')} and ${last} ${whos.length > 1 ? 'all' : 'both'} fire on every press. Move one to a different button.`;
+        } else {
+          message = `${pad} ${label(names[0])} is used by ${whos.join(', ')} and ${last} — one press drives all of them.`
+            + (bothMacro ? ' Only the later macro will ever run; the earlier one can never fire.' : '');
+        }
+        warnings.push({ type: (alias || bothMacro) ? 'error' : 'warning', message });
       });
     })();
 
@@ -833,7 +1165,8 @@ const FTCRobotConfigurator = () => {
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
-      sensors, aprilTagSize, targetTags,
+      ledStatusEnabled, ledReadyPattern, ledSpinUpPattern, ledIdlePattern, ledDwellMs,
+      sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
@@ -853,27 +1186,43 @@ const FTCRobotConfigurator = () => {
     }
     
     setSavedConfigs(newConfigs);
-    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+    // A failed write must not look like a successful save. setItem throws when
+    // storage is blocked or the quota is full, and a team that believes a config
+    // is saved will not export it.
+    try {
+      localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+      setStorageError(null);
+    } catch (e) {
+      setStorageError('This configuration could NOT be saved to the browser. Use Export to save it ' +
+        'to a file — it will be lost when this page is closed.');
+    }
     setShowSaveModal(false);
   };
 
   // Load configuration
   const loadConfig = (config) => {
+    // Zero is a real measurement, not a missing one. A pod mounted flush to the
+    // right rail is genuinely 0 inches from right; with `||` that silently
+    // became the 9-inch default and every offset downstream was wrong by nine
+    // inches. Use this for any numeric field where zero is a legal value.
+    const numOr = (v, dflt) => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)))
+      ? dflt : Number(v);
+
     setRobotName(config.name || 'My Robot');
-    setRobotLength(config.robotLength || 18);
-    setRobotWidth(config.robotWidth || 18);
+    setRobotLength(numOr(config.robotLength, 18));
+    setRobotWidth(numOr(config.robotWidth, 18));
     setWheelBrand(config.wheelBrand || 'gobilda');
     setWheelType(config.wheelType || 'mecanum');
-    setWheelSize(config.wheelSize || 104);
+    setWheelSize(numOr(config.wheelSize, 104));
     setOdo1Type(config.odo1Type || 'gobilda_4bar');
-    setOdo1FromBack(config.odo1FromBack || 9);
-    setOdo1FromRight(config.odo1FromRight || 9);
+    setOdo1FromBack(numOr(config.odo1FromBack, 9));
+    setOdo1FromRight(numOr(config.odo1FromRight, 9));
     setOdo1Reversed(config.odo1Reversed || false);
     setOdo1Measures(config.odo1Measures || 'forward_back');
     setOdo1Port(config.odo1Port || { hub: 'control', port: 0 });
     setOdo2Type(config.odo2Type || 'gobilda_4bar');
-    setOdo2FromBack(config.odo2FromBack || 9);
-    setOdo2FromRight(config.odo2FromRight || 9);
+    setOdo2FromBack(numOr(config.odo2FromBack, 9));
+    setOdo2FromRight(numOr(config.odo2FromRight, 9));
     setOdo2Reversed(config.odo2Reversed || false);
     setOdo2Measures(config.odo2Measures || 'left_right');
     setOdo2Port(config.odo2Port || { hub: 'control', port: 1 });
@@ -888,21 +1237,33 @@ const FTCRobotConfigurator = () => {
     setImuLogoDirection(config.imuLogoDirection || 'UP');
     setImuUsbDirection(config.imuUsbDirection || 'FORWARD');
     setLimelightVersion(config.limelightVersion || '3a');
-    setLimelightFromBack(config.limelightFromBack || 9);
-    setLimelightFromRight(config.limelightFromRight || 9);
-    setLimelightHeight(config.limelightHeight || 8);
+    setLimelightFromBack(numOr(config.limelightFromBack, 9));
+    setLimelightFromRight(numOr(config.limelightFromRight, 9));
+    setLimelightHeight(numOr(config.limelightHeight, 8));
     setLimelightFacing(config.limelightFacing || 'FORWARD');
     setMotors(config.motors || []);
-    setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', ...m })));
+    // hasEncoder defaults true for configs saved before the flag existed —
+    // that is what they were generated as.
+    setAuxMotors((config.auxMotors || []).map(m => ({ zeroPower: 'FLOAT', hasEncoder: true, ...m })));
     setDriveZeroPower(config.driveZeroPower || 'BRAKE');
     setServos(config.servos || []);
     setHasExpansionHub(config.hasExpansionHub || false);
     setHasBlinkin(config.hasBlinkin || false);
     setBlinkinPort(config.blinkinPort || { hub: 'control', port: 0 });
     setBlinkinPatterns(config.blinkinPatterns || []);
+    setLedStatusEnabled(config.ledStatusEnabled || false);
+    setLedReadyPattern(config.ledReadyPattern || '');
+    setLedSpinUpPattern(config.ledSpinUpPattern || '');
+    setLedIdlePattern(config.ledIdlePattern || '');
+    setLedDwellMs(numOr(config.ledDwellMs, 200));
     setSensors(config.sensors || []);
-    setAprilTagSize(config.aprilTagSize || 165);
+    setAprilTagSize(numOr(config.aprilTagSize, 165));
     setTargetTags(config.targetTags || []);
+    // Configs saved before clusters existed keep the BIOBUZZ defaults rather
+    // than an empty list, so the Target dropdown never goes blank on load.
+    if (Array.isArray(config.clusters) && config.clusters.length) setClusters(config.clusters);
+    if (Array.isArray(config.clusterTagOffsets) && config.clusterTagOffsets.length === 4) setClusterTagOffsets(config.clusterTagOffsets);
+    // Not numOr: zero controllers is not a configuration anyone means.
     setNumControllers(config.numControllers || 2);
     setGamepad1Role(config.gamepad1Role || 'driver');
     setGamepad2Role(config.gamepad2Role || 'operator');
@@ -911,7 +1272,8 @@ const FTCRobotConfigurator = () => {
     setDriveRotate(config.driveRotate || 'right_stick_x');
     setResetHeadingButton(config.resetHeadingButton || 'options');
     setSlowModeButton(config.slowModeButton || 'none');
-    setSlowModeSpeed(config.slowModeSpeed || 0.4);
+    // Zero is a legal slow-mode speed — it makes the button a hold-to-stop.
+    setSlowModeSpeed(numOr(config.slowModeSpeed, 0.4));
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setServoControls(config.servoControls || {});
@@ -926,7 +1288,7 @@ const FTCRobotConfigurator = () => {
     setTelemetryLoopTime(config.telemetryLoopTime || false);
     setTelemetryAlerts(config.telemetryAlerts || false);
     setMacros(config.macros || []);
-    setDefaultTolerance(config.defaultTolerance || 1.0);
+    setDefaultTolerance(numOr(config.defaultTolerance, 1.0));
     setShowLoadModal(false);
   };
 
@@ -934,7 +1296,13 @@ const FTCRobotConfigurator = () => {
   const deleteConfig = (configName) => {
     const newConfigs = savedConfigs.filter(c => c.name !== configName);
     setSavedConfigs(newConfigs);
-    localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+    try {
+      localStorage.setItem('ftc_robot_configs', JSON.stringify(newConfigs));
+      setStorageError(null);
+    } catch (e) {
+      setStorageError('The deletion could not be written to browser storage, so this configuration ' +
+        'will reappear when the page is reloaded.');
+    }
   };
 
   // Export configuration as JSON file
@@ -953,7 +1321,8 @@ const FTCRobotConfigurator = () => {
       limelightVersion, limelightFromBack, limelightFromRight, limelightHeight, limelightFacing,
       motors, auxMotors, servos, hasExpansionHub, driveZeroPower,
       hasBlinkin, blinkinPort, blinkinPatterns,
-      sensors, aprilTagSize, targetTags,
+      ledStatusEnabled, ledReadyPattern, ledSpinUpPattern, ledIdlePattern, ledDwellMs,
+      sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
@@ -996,6 +1365,14 @@ const FTCRobotConfigurator = () => {
 
     (macro.steps || []).forEach((st, idx) => {
       body.push(`// step ${idx + 1}: ${st.type}`);
+      // Same gate the TeleOp generator applies. Without it a step that names a
+      // missing motor, or needs an encoder the motor does not have, emits
+      // uncompilable or non-terminating Java straight into PathPilot's auto.
+      const problem = stepProblem(st);
+      if (problem) {
+        body.push(`// SKIPPED: ${problem}. Fix the macro in BotBuilder.`);
+        return;
+      }
       body.push('if (!opModeIsActive()) return;');
       switch (st.type) {
         case 'motor_position':
@@ -1025,14 +1402,20 @@ const FTCRobotConfigurator = () => {
           body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           estSeconds += (st.motorDuration !== undefined ? Number(st.motorDuration) : 1.0);
           break;
-        case 'motor_until_velocity':
-          usedMotors.add(javaVarName(st.motorName));
-          body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 1.0});`);
+        case 'motor_until_velocity': {
+          const v = javaVarName(st.motorName);
+          const tgt = Number(st.targetVelocity) || 0;
+          const tol = Number(st.velocityTolerance) || 100;
+          usedMotors.add(v);
+          body.push(`// closed-loop: hold ${tgt} ticks/sec, proceed once within ${tol}`);
+          body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+          body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
           body.push('macroTimer.reset();');
-          body.push(`while (opModeIsActive() && Math.abs(${javaVarName(st.motorName)}.getVelocity()) < ${st.targetVelocity || 0}`);
+          body.push(`while (opModeIsActive() && Math.abs(${v}.getVelocity() - ${tgt.toFixed(1)}) > ${tol.toFixed(1)}`);
           body.push(`       && macroTimer.seconds() < ${st.velocityTimeout || 3.0}) idle();`);
           estSeconds += Math.min(Number(st.velocityTimeout || 3.0), 1.5);
           break;
+        }
         case 'wait_velocity': {
           usedMotors.add(javaVarName(st.motorName));
           const cmp = st.velocityCondition === 'below' ? '>' : '<';
@@ -1261,10 +1644,21 @@ const FTCRobotConfigurator = () => {
         facing: limelightFacing, pipeline: 0,
         tagSizeMm: Number(aprilTagSize) || null
       } : { present: false },
+      // Multi-tag targets. PathPilot's drive-to-tag can aim at a cell by any
+      // visible member instead of stalling on one ID.
+      clusters: (clusters || []).map(c => ({
+        name: c.name, alliance: c.alliance,
+        tagIds: (c.tagIds || []).map(Number).filter(n => !Number.isNaN(n))
+      })),
+      clusterTagOffsetsIn: (clusterTagOffsets || []).map(o => ({ x: Number(o.x) || 0, z: Number(o.z) || 0 })),
       blinkin: hasBlinkin ? { present: true, hardwareName: 'blinkin' } : { present: false },
       auxMotors: (auxMotors || []).map(mm => ({
         hardwareName: mm.name, hub: mm.hub || 'control', port: mm.port, reversed: !!mm.reversed,
-        zeroPower: mm.zeroPower || 'FLOAT'
+        zeroPower: mm.zeroPower || 'FLOAT',
+        // PathPilot's autonomous init must pick the same run mode TeleOp does,
+        // or a motor that behaves in TeleOp surges in auto.
+        hasEncoder: hasEncoder(mm),
+        runMode: hasEncoder(mm) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'
       })),
       servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
       macros: exposedMacros,
@@ -1316,7 +1710,7 @@ const FTCRobotConfigurator = () => {
       'import com.qualcomm.robotcore.hardware.DcMotorSimple;',
       '',
       '/**',
-      ` * ${className} — generated by BotBuilder from the "${robotName}" configuration.`,
+      ` * ${className} — generated by BotBuilder from the "${javaString(robotName)}" configuration.`,
       ' *',
       ' * Runs one motor at a time so you can see which way it turns.',
       ' *',
@@ -1339,12 +1733,12 @@ const FTCRobotConfigurator = () => {
       ' *   from a standstill. That reading is the lowest power that beats static',
       ' *   friction — a little above it is a good value for MIN_POWER.',
       ' */',
-      `@TeleOp(name = "${robotName} Motor Test", group = "Diagnostic")`,
+      `@TeleOp(name = "${className}", group = "Diagnostic")`,
       `public class ${className} extends LinearOpMode {`,
       '');
 
     P('    private static final String[] NAMES = {',
-      '        ' + all.map(m => `"${m.name}"`).join(', '),
+      '        ' + all.map(m => `"${javaString(m.name)}"`).join(', '),
       '    };',
       '    private static final String[] PORTS = {',
       '        ' + all.map(m => `"${m.hub || 'control'} hub, port ${m.port}"`).join(', '),
@@ -1379,7 +1773,7 @@ const FTCRobotConfigurator = () => {
       '            motorList[i].setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);',
       '        }',
       '',
-      `        telemetry.addLine("${robotName} motor test");`,
+      `        telemetry.addLine("${javaString(robotName)} motor test");`,
       '        telemetry.addData("motors", NAMES.length);',
       '        telemetry.addLine("");',
       '        telemetry.addLine("Nothing is reversed here. Watch which way each");',
@@ -1517,15 +1911,19 @@ const FTCRobotConfigurator = () => {
       'import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;',
       '',
       '/**',
-      ` * ${className} — generated by BotBuilder from the "${robotName}" configuration.`,
+      ` * ${className} — generated by BotBuilder from the "${javaString(robotName)}" configuration.`,
       ' *',
       ' * Measures the four odometry numbers that cannot be derived on paper, and',
       ' * prints values to type back into BotBuilder.',
       ' *',
-      ' *   0. PORT SCAN  see raw ticks on every motor port at once',
-      ' *   1. STRAIGHT   push a known distance forward  -> parallel ticks/inch',
-      ' *   2. STRAFE     push a known distance left     -> perpendicular ticks/inch',
-      ' *   3. SPIN       rotate N turns in place        -> both pod offsets',
+      ' *   1. PORT SCAN  see raw ticks on every motor port at once',
+      ' *   2. STRAIGHT   push a known distance forward        -> parallel ticks/inch',
+      ' *   3. STRAFE     push left, record, push right, record -> perpendicular ticks/inch',
+      ' *                 (two pushes so a reversed pod shows up as a sign disagreement)',
+      ' *   4. SPIN       rotate N turns in place              -> both pod offsets',
+      ' *   5. VERIFY     push a square and check the pose returns to 0,0',
+      ' *',
+      ' *   D-pad up/down moves between tests. A re-zeros the current test. B records.',
       ' *',
       ' * WHY THE SPIN TEST WORKS',
       ' *   Spinning in place moves the robot centre nowhere, so every tick a pod',
@@ -1541,7 +1939,7 @@ const FTCRobotConfigurator = () => {
       ' *',
       ' * Self-contained. Regenerate from BotBuilder rather than editing here.',
       ' */',
-      `@TeleOp(name = "${robotName} Odometry Calibration", group = "Calibration")`,
+      `@TeleOp(name = "${className}", group = "Calibration")`,
       `public class ${className} extends LinearOpMode {`,
       '');
 
@@ -1567,7 +1965,7 @@ const FTCRobotConfigurator = () => {
 
     // Every motor gets scanned, so a mis-wired pod is visible rather than silent.
     P('    // Every motor port, for the scan.',
-      `    private static final String[] ALL_MOTORS = { ${allMotors.map(mm => `"${mm.name}"`).join(', ')} };`,
+      `    private static final String[] ALL_MOTORS = { ${allMotors.map(mm => `"${javaString(mm.name)}"`).join(', ')} };`,
       `    private static final String[] ALL_PORTS = { ${allMotors.map(mm => `"${mm.hub || 'control'} ${mm.port}"`).join(', ')} };`,
       `    private final DcMotorEx[] scan = new DcMotorEx[${allMotors.length}];`,
       `    private final int[] scanZero = new int[${allMotors.length}];`,
@@ -1597,7 +1995,7 @@ const FTCRobotConfigurator = () => {
     if (parHost) P(`        parallelPod = hardwareMap.get(DcMotorEx.class, PARALLEL_MOTOR);`);
     if (perHost) P(`        perpendicularPod = hardwareMap.get(DcMotorEx.class, PERPENDICULAR_MOTOR);`);
     P('');
-    allMotors.forEach((mm, i) => P(`        scan[${i}] = hardwareMap.get(DcMotorEx.class, "${mm.name}");`));
+    allMotors.forEach((mm, i) => P(`        scan[${i}] = hardwareMap.get(DcMotorEx.class, "${javaString(mm.name)}");`));
     P('',
       '        imu = hardwareMap.get(IMU.class, "imu");',
       '        imu.initialize(new IMU.Parameters(new RevHubOrientationOnRobot(',
@@ -1620,7 +2018,7 @@ const FTCRobotConfigurator = () => {
       '        telemetry.addLine("A             : zero this test");',
       '        telemetry.addLine("B             : record result");',
       '        telemetry.addLine("");',
-      '        telemetry.addLine("Start on TEST 0 (port scan) if you are unsure");',
+      '        telemetry.addLine("Start on TEST 1 (port scan) if you are unsure");',
       '        telemetry.addLine("which port your pods are plugged into.");',
       '        telemetry.update();',
       '',
@@ -1765,7 +2163,7 @@ const FTCRobotConfigurator = () => {
     P('    private void render() {',
       '        switch (test) {',
       '            case 0:',
-      '                telemetry.addLine("TEST 0/4  PORT SCAN");',
+      '                telemetry.addLine("TEST 1 of 5  PORT SCAN");',
       '                telemetry.addLine("Push the robot and watch which ports move.");',
       '                telemetry.addLine("A pod shows thousands of ticks; a bare motor port shows 0.");',
       '                telemetry.addLine("");',
@@ -1781,7 +2179,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 1:',
-      '                telemetry.addLine("TEST 1/4  STRAIGHT");',
+      '                telemetry.addLine("TEST 2 of 5  STRAIGHT");',
       '                telemetry.addData("Push FORWARD exactly", "%.1f in, then press B", STRAIGHT_TEST_INCHES);',
       '                telemetry.addLine("");',
       '                telemetry.addData("parallel ticks", deltaParallel());',
@@ -1790,7 +2188,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 2:',
-      '                telemetry.addLine("TEST 2/4  STRAFE  (two pushes)");',
+      '                telemetry.addLine("TEST 3 of 5  STRAFE  (two pushes)");',
       '                if (!strafeLeftDone) {',
       '                    telemetry.addData("1. Push the ROBOT\'S LEFT", "%.1f in, then press B", STRAFE_TEST_INCHES);',
       '                    telemetry.addLine("   (stand behind the robot and that is your left too)");',
@@ -1831,7 +2229,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 3:',
-      '                telemetry.addLine("TEST 3/4  SPIN");',
+      '                telemetry.addLine("TEST 4 of 5  SPIN");',
       '                telemetry.addData("Rotate CLOCKWISE", "%.0f turns in place, then press B", SPIN_TEST_REVOLUTIONS);',
       '                telemetry.addLine("Keep the centre of rotation fixed.");',
       '                telemetry.addLine("");',
@@ -1841,7 +2239,7 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '',
       '            case 4:',
-      '                telemetry.addLine("TEST 4/4  VERIFY");',
+      '                telemetry.addLine("TEST 5 of 5  VERIFY");',
       '                telemetry.addLine("Type the results into BotBuilder, regenerate,");',
       '                telemetry.addLine("then push a square here and check it returns to 0,0.");',
       '                telemetry.addLine("");',
@@ -1855,6 +2253,11 @@ const FTCRobotConfigurator = () => {
       '                break;',
       '        }',
       '',
+      '        // Always visible. Nobody at the field remembers which button changes',
+      '        // test, and the person holding the gamepad is rarely the one who read',
+      '        // the instructions.',
+      '        telemetry.addLine("");',
+      '        telemetry.addLine("D-PAD UP/DOWN change test   A re-zero   B record");',
       '        telemetry.addLine("");',
       '        telemetry.addLine("RESULTS  (type these into BotBuilder)");',
       '        report("parallel ticks/inch", straightTicksPerInch, PARALLEL_TICKS_PER_INCH);',
@@ -1941,19 +2344,19 @@ const FTCRobotConfigurator = () => {
   // Generate code snippet
   const generateCodeSnippet = () => {
     const driveMotorCode = motors.map(m => 
-      `${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${m.name}");
+      `${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${javaString(m.name)}");
 ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
 ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${driveZeroPower});`
     ).join('\n');
 
     const auxMotorCode = auxMotors.map(m => 
-      `${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${m.name}");
+      `${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${javaString(m.name)}");
 ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
 ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});`
     ).join('\n');
 
     const servoCode = servos.map(s => 
-      `${s.name} = hardwareMap.get(Servo.class, "${s.name}");`
+      `${s.name} = hardwareMap.get(Servo.class, "${javaString(s.name)}");`
     ).join('\n');
 
     return `// ============================================
@@ -2045,13 +2448,13 @@ ${sensors.map(s => {
   const sensorInfo = sensorDatabase[s.type];
   if (sensorInfo?.interface === 'i2c') {
     return `// ${s.name} - ${sensorInfo.name} (I2C, ${s.hub} hub port ${s.port})
-// ${s.name} = hardwareMap.get(${sensorInfo.type === 'color' ? 'ColorSensor' : sensorInfo.type === 'distance' ? 'DistanceSensor' : 'I2cDevice'}.class, "${s.name}");`;
+// ${s.name} = hardwareMap.get(${sensorInfo.type === 'color' ? 'ColorSensor' : sensorInfo.type === 'distance' ? 'DistanceSensor' : 'I2cDevice'}.class, "${javaString(s.name)}");`;
   } else if (sensorInfo?.interface === 'digital') {
     return `// ${s.name} - ${sensorInfo.name} (Digital, ${s.hub} hub port ${s.port})
-// ${s.name} = hardwareMap.get(DigitalChannel.class, "${s.name}");`;
+// ${s.name} = hardwareMap.get(DigitalChannel.class, "${javaString(s.name)}");`;
   } else if (sensorInfo?.interface === 'analog') {
     return `// ${s.name} - ${sensorInfo.name} (Analog, ${s.hub} hub port ${s.port})
-// ${s.name} = hardwareMap.get(AnalogInput.class, "${s.name}");`;
+// ${s.name} = hardwareMap.get(AnalogInput.class, "${javaString(s.name)}");`;
   }
   return `// ${s.name} - ${sensorInfo?.name || 'Unknown'}`;
 }).join('\n\n')}
@@ -2065,6 +2468,11 @@ ${sensors.map(s => {
   // cannot compile, so the step is commented out and reported instead.
   // Generate Complete TeleOp Code
   const generateCompleteTeleOp = () => {
+    // One name for both the class and the Driver Station entry. Built through
+    // javaClassName so they cannot drift, and so a robot name containing a
+    // quote cannot break out of the annotation's string literal.
+    const className = javaClassName(robotName, 'TeleOp');
+
     // With a single controller everything is on gamepad1. Falling back to
     // gamepad2 there binds mechanisms to a pad that does not exist, and the
     // controls silently never respond.
@@ -2109,8 +2517,13 @@ ${sensors.map(s => {
     // Generate motor control code
     // A motor a macro latches on must not also be written every loop, or the
     // control immediately overwrites the latched power.
-    const latchedByMacro = (name) => (macros || []).some(m =>
-      (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
+    //
+    // PathPilot-only macros are excluded: they generate no TeleOp code at all,
+    // so they can never latch anything here. Counting them would suppress a
+    // direct control on behalf of a macro that only ever runs in autonomous.
+    const latchedByMacro = (name) => (macros || [])
+      .filter(m => m.triggerType !== 'pathpilot')
+      .some(m => (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
 
     const generateMotorControlCode = (motorArg) => {
       const motor = { ...motorArg, name: javaVarName(motorArg.name), label: motorArg.name };
@@ -2130,40 +2543,64 @@ ${sensors.map(s => {
         return `        // ${motor.label} is driven by macros only — no direct control,
         // so a latching Turn Motor On is not overwritten each loop.`;
       }
+
+      // Velocity mode, and the three things that have to hold for it.
+      // A toggle is discrete whatever selects it, so it qualifies on its own;
+      // otherwise the control scheme itself has to be a discrete one.
+      const velMode = isVelocityMotor(motorArg);
+      const vel = (Number(ctrl.velocity) || 0).toFixed(1);
+      const tgt = `${motor.name}Target`;
+
+      // Under velocity, every branch writes the target field and one
+      // setVelocity below commands it. Routing through a field rather than
+      // calling setVelocity in each branch gives the at-speed tracker a single
+      // place to read what was actually asked for.
+      const set = (v) => velMode ? `${tgt} = ${v};` : `${motor.name}.setPower(${v});`;
+      const mag = (sign) => velMode ? `${sign}${vel}` : `${sign}${power}`;
+      const tail = velMode ? `
+        ${motor.name}.setVelocity(${tgt});` : '';
+      const unit = velMode ? ` (velocity, ${vel} ticks/sec)` : '';
+
       if (ctrl.behavior === 'toggle') {
-        const toggleBtn = ctrl.control === 'single'
-          ? (ctrl.singleButton || 'dpad_up')
-          : (ctrl.control === 'trigger_pair' ? 'right_bumper' : 'a');
-        code = `        // ${motor.name} - Toggle control
+        const toggleBtn = toggleButtonFor(ctrl);
+        code = `        // ${motor.name} - Toggle control${unit}
         if (${getButtonCode(toggleBtn, gp)} && !${motor.name}ButtonPrev) {
             ${motor.name}Running = !${motor.name}Running;
         }
         ${motor.name}ButtonPrev = ${getButtonCode(toggleBtn, gp)};
-        ${motor.name}.setPower(${motor.name}Running ? ${ctrl.singleDirection === 'reverse' ? '-' : ''}${power} : 0);`;
+        ${set(`${motor.name}Running ? ${mag(ctrl.singleDirection === 'reverse' ? '-' : '')} : 0`)}${tail}`;
       } else {
         // Hold behavior
         switch (ctrl.control) {
           case 'trigger_pair':
-            code = `        // ${motor.name} - Trigger control
+            code = velMode
+              ? `        // ${motor.name} - Trigger control${unit}
+        // Under velocity the triggers are buttons, not a proportional input.
+        // A shooter wants one repeatable speed, not one that tracks how far
+        // the trigger happens to be pulled this time.
+        if (${gp}.right_trigger > 0.5) ${set(mag(''))}
+        else if (${gp}.left_trigger > 0.5) ${set(mag('-'))}
+        else ${set('0')}${tail}`
+              : `        // ${motor.name} - Trigger control
         ${motor.name}.setPower((${gp}.right_trigger - ${gp}.left_trigger) * ${power});`;
             break;
           case 'bumper_pair':
-            code = `        // ${motor.name} - Bumper control
-        if (${gp}.right_bumper) ${motor.name}.setPower(${power});
-        else if (${gp}.left_bumper) ${motor.name}.setPower(-${power});
-        else ${motor.name}.setPower(0);`;
+            code = `        // ${motor.name} - Bumper control${unit}
+        if (${gp}.right_bumper) ${set(mag(''))}
+        else if (${gp}.left_bumper) ${set(mag('-'))}
+        else ${set('0')}${tail}`;
             break;
           case 'dpad_updown':
-            code = `        // ${motor.name} - D-Pad Up/Down control
-        if (${gp}.dpad_up) ${motor.name}.setPower(${power});
-        else if (${gp}.dpad_down) ${motor.name}.setPower(-${power});
-        else ${motor.name}.setPower(0);`;
+            code = `        // ${motor.name} - D-Pad Up/Down control${unit}
+        if (${gp}.dpad_up) ${set(mag(''))}
+        else if (${gp}.dpad_down) ${set(mag('-'))}
+        else ${set('0')}${tail}`;
             break;
           case 'dpad_leftright':
-            code = `        // ${motor.name} - D-Pad Left/Right control
-        if (${gp}.dpad_right) ${motor.name}.setPower(${power});
-        else if (${gp}.dpad_left) ${motor.name}.setPower(-${power});
-        else ${motor.name}.setPower(0);`;
+            code = `        // ${motor.name} - D-Pad Left/Right control${unit}
+        if (${gp}.dpad_right) ${set(mag(''))}
+        else if (${gp}.dpad_left) ${set(mag('-'))}
+        else ${set('0')}${tail}`;
             break;
           case 'left_stick_y':
             code = `        // ${motor.name} - Left Stick Y control
@@ -2174,22 +2611,22 @@ ${sensors.map(s => {
         ${motor.name}.setPower(-${gp}.right_stick_y * ${power});`;
             break;
           case 'ab_buttons':
-            code = `        // ${motor.name} - A/B button control
-        if (${gp}.a) ${motor.name}.setPower(${power});
-        else if (${gp}.b) ${motor.name}.setPower(-${power});
-        else ${motor.name}.setPower(0);`;
+            code = `        // ${motor.name} - A/B button control${unit}
+        if (${gp}.a) ${set(mag(''))}
+        else if (${gp}.b) ${set(mag('-'))}
+        else ${set('0')}${tail}`;
             break;
           case 'xy_buttons':
-            code = `        // ${motor.name} - X/Y button control
-        if (${gp}.y) ${motor.name}.setPower(${power});
-        else if (${gp}.x) ${motor.name}.setPower(-${power});
-        else ${motor.name}.setPower(0);`;
+            code = `        // ${motor.name} - X/Y button control${unit}
+        if (${gp}.y) ${set(mag(''))}
+        else if (${gp}.x) ${set(mag('-'))}
+        else ${set('0')}${tail}`;
             break;
           case 'single': {
             const btn = getButtonCode(ctrl.singleButton || 'dpad_up', gp);
             const sign = (ctrl.singleDirection === 'reverse') ? '-' : '';
-            code = `        // ${motor.name} - single button, ${ctrl.singleDirection || 'forward'} only
-        ${motor.name}.setPower(${btn} ? ${sign}${power} : 0);`;
+            code = `        // ${motor.name} - single button, ${ctrl.singleDirection || 'forward'} only${unit}
+        ${set(`${btn} ? ${mag(sign)} : 0`)}${tail}`;
             break;
           }
           default:
@@ -2261,6 +2698,17 @@ ${sensors.map(s => {
     const toggleMotors = auxMotors.filter(m => (motorControls[m.name]?.behavior || 'hold') === 'toggle');
     const toggleServos = servos.filter(s => (servoControls[s.name]?.behavior || (isContinuous(s) ? 'hold' : 'toggle')) === 'toggle');
 
+    // Motors commanded by velocity. Several blocks below are driven off this
+    // one list so they cannot disagree about which motors exist.
+    const velocityMotors = auxMotors.filter(m => isVelocityMotor(m));
+    const velTol = (m) => Number(motorControls[m.name]?.velocityTolerance) || 100;
+
+    // The status LED needs a Blinkin, patterns chosen for all three states, and
+    // at least one velocity motor to have an opinion about.
+    const ledStatusActive = ledStatusEnabled && hasBlinkin && velocityMotors.length > 0
+      && ledReadyPattern && ledSpinUpPattern && ledIdlePattern;
+    const ledConst = (n) => `BLINKIN_${String(n).toUpperCase().replace(/\s+/g, '_')}`;
+
     return `package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
@@ -2292,8 +2740,8 @@ ${(() => {
   return Array.from(need).sort().map(p => `import ${p};`).join('\n');
 })()}
 
-@TeleOp(name = "${robotName} TeleOp", group = "TeleOp")
-public class ${javaClassName(robotName, 'TeleOp')} extends LinearOpMode {
+@TeleOp(name = "${className}", group = "TeleOp")
+public class ${className} extends LinearOpMode {
 
     // Drive Motors
 ${motors.map(m => `    private DcMotor ${javaVarName(m.name)};`).join('\n')}
@@ -2328,6 +2776,17 @@ ${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values 
     private static final double TAG_MAX_POWER = 0.45;
     private static final double TAG_ANGLE_TOLERANCE = 3.0;
     private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
+
+    // AprilTag clusters: several tags, one target. Any visible member locates
+    // the cell, and the step keeps driving on whichever one is in view instead
+    // of stalling because the one ID it wanted went behind a ball.
+${(clusters || []).map(c => `    private static final int[] ${CLUSTER_CONST(c)} = { ${(c.tagIds || []).map(Number).filter(n => !Number.isNaN(n)).join(', ')} };   // ${c.alliance === 'B' ? 'blue' : 'red'}, "${javaString(c.name)}"`).join('\n')}
+    // Where each tag sits relative to the cell opening, inches, in the camera's
+    // view (x lateral + right, z depth + further). Every cell uses the same
+    // sticker, so one set serves all clusters. Slot i pairs with ids[i].
+    private static final double[] CLUSTER_OFF_X_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.x) || 0).toFixed(2)).join(', ')} };
+    private static final double[] CLUSTER_OFF_Z_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.z) || 0).toFixed(2)).join(', ')} };
+    private static final double[] NO_OFFSETS = { 0, 0, 0, 0 };
 ` : ''}
 ${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.perpendicular.varName; })()) ? (() => {
   const p = podInfo();
@@ -2360,6 +2819,18 @@ ${driveLayout().kind === 'mecanum' ? `    /** Field-oriented until the driver to
 ${toggleMotors.length > 0 ? `    // Motor toggle states
 ${toggleMotors.map(m => `    private boolean ${javaVarName(m.name)}Running = false;
     private boolean ${javaVarName(m.name)}ButtonPrev = false;`).join('\n')}` : ''}
+${velocityMotors.length > 0 ? `
+    // Velocity control state.
+    //
+    // Target is what the controls asked for this loop; AtSpeed is whether the
+    // motor has actually settled there. They are fields rather than locals so
+    // the tracker, the telemetry and the LED all read the same values, and so
+    // AtSpeed survives between loops — a flag recomputed from scratch each
+    // iteration could not require the reading to hold steady for a while, and
+    // holding steady is the whole point.
+${velocityMotors.map(m => `    private double ${javaVarName(m.name)}Target = 0;
+    private boolean ${javaVarName(m.name)}AtSpeed = false;
+    private ElapsedTime ${javaVarName(m.name)}BandTimer = new ElapsedTime();`).join('\n')}` : ''}
 
 ${toggleServos.length > 0 ? `    // Servo toggle states
 ${toggleServos.map(s => `    private boolean ${javaVarName(s.name)}${isContinuous(s) ? 'Running' : 'Open'} = false;
@@ -2375,21 +2846,29 @@ ${macros.map((m, i) => m.triggerType === 'pathpilot' ? null : `    private boole
     public void runOpMode() {
         // Initialize drive motors
         // Zero power behaviour: ${driveZeroPower} (set in BotBuilder's Drive tab)
-${motors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${m.name}");
+${motors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotor.class, "${javaString(m.name)}");
         ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
         ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${driveZeroPower});`).join('\n')}
 
 ${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx for velocity)
-${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${m.name}");
+        //
+        // Run mode follows whether an encoder is actually plugged in. With one,
+        // RUN_USING_ENCODER makes setPower(x) a velocity target that the hub's
+        // PID holds — consistent speed under load and across battery voltage.
+        // Without one, that same mode reads a velocity of zero forever, decides
+        // the motor is stalled, and drives it harder: the motor surges or runs
+        // flat out whatever power was asked for. RUN_WITHOUT_ENCODER makes
+        // setPower(x) plain voltage, which is the only thing that works there.
+${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${javaString(m.name)}");
         ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
         ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});
-        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`).join('\n')}` : ''}
+        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.${hasEncoder(m) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'});${hasEncoder(m) ? '' : '   // no encoder connected'}`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
 ${servos.map(s => isContinuous(s)
-  ? `        ${javaVarName(s.name)} = hardwareMap.get(CRServo.class, "${s.name}");
+  ? `        ${javaVarName(s.name)} = hardwareMap.get(CRServo.class, "${javaString(s.name)}");
         ${javaVarName(s.name)}.setPower(0);  // stopped until a control asks for motion`
-  : `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${s.name}");${
+  : `        ${javaVarName(s.name)} = hardwareMap.get(Servo.class, "${javaString(s.name)}");${
   (servoControls[s.name] && servoControls[s.name].position1 !== undefined)
     ? `\n        ${javaVarName(s.name)}.setPosition(${servoControls[s.name].position1});  // starting position`
     : ''}`).join('\n')}` : ''}
@@ -2398,7 +2877,7 @@ ${sensors.length > 0 ? `        // Initialize sensors
 ${sensors.map(sn => {
   const info = sensorDatabase[sn.type] || {};
   const v = javaVarName(sn.name);
-  let code = `        ${v} = hardwareMap.get(${info.javaType || 'DigitalChannel'}.class, "${sn.name}");`;
+  let code = `        ${v} = hardwareMap.get(${info.javaType || 'DigitalChannel'}.class, "${javaString(sn.name)}");`;
   if ((info.javaType || '') === 'DigitalChannel') {
     code += `\n        ${v}.setMode(DigitalChannel.Mode.INPUT);`;
   }
@@ -2420,7 +2899,7 @@ ${hasBlinkin ? `        // Initialize Blinkin
         blinkin = hardwareMap.get(Servo.class, "blinkin");
         blinkin.setPosition(BLINKIN_${(blinkinPatterns[0]?.name || 'DEFAULT').toUpperCase().replace(/\s+/g, '_')});` : ''}
 
-        telemetry.addLine("${robotName} Ready!");
+        telemetry.addLine("${javaString(robotName)} Ready!");
 ${macros.length > 0 ? `        telemetry.addLine("Macros: ${macros.length} configured");` : ''}
         telemetry.update();
 
@@ -2429,11 +2908,17 @@ ${macros.length > 0 ? `        telemetry.addLine("Macros: ${macros.length} confi
 
         while (opModeIsActive()) {
 ${macros.length > 0 ? `            // === MACRO CANCEL (START button) ===
+            //
+            // START is reserved for this on both gamepads. Anything else bound
+            // to it reads the same press, which is why BotBuilder warns when a
+            // control claims it.
+            boolean macroJustCancelled = false;
             if (gamepad1.start${numControllers === 1 ? '' : ' || gamepad2.start'}) {
                 if (activeMacro != -1) {
                     activeMacro = -1;
                     macroStep = 0;
                     macroStepStarted = false;
+                    macroJustCancelled = true;
                     // Stop all motors when canceling
                     ${auxMotors.length ? auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ') : '// no auxiliary motors to stop'}
                 }
@@ -2493,16 +2978,34 @@ ${macros.map((macro, i) => {
   // No trigger means nothing can ever set activeMacro to this index.
   if (macro.triggerType === 'pathpilot') return '';
   
+  // Hold-to-run only means anything for a macro the driver physically holds.
+  // A toggle or an auto-trigger has no release to watch for.
+  const isHold = macro.behavior === 'hold'
+    && (macro.triggerType === 'button' || macro.triggerType === 'combo');
+
+  // The aux motors this macro actually drives. Zeroing every aux motor on
+  // release stops unrelated mechanisms — an intake macro should not stop the
+  // arm. Only the cancel button is a global stop.
+  const ownedMotors = [...new Set((macro.steps || [])
+    .filter(st => [...MOTOR_STEPS, 'motor_on', 'motor_off'].includes(st.type))
+    .map(st => st.motorName)
+    .filter(Boolean)
+    .filter(n => (auxMotors || []).some(m => m.name === n))
+    .map(n => javaVarName(n)))];
+
   let macroCode = `            if (activeMacro == ${i}) {
                 // ${macro.name}
-${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerType === 'combo') ? 
+${isHold ?
 `                // Hold behavior - check if button released
-                if (!${macro.triggerType === 'combo' ? 
-  `(${getButtonCode(macro.triggerCombo || 'left_bumper', macro.triggerController)} && ${getButtonCode(macro.triggerButton, macro.triggerController)})` : 
+                if (!${macro.triggerType === 'combo' ?
+  `(${getButtonCode(macro.triggerCombo || 'left_bumper', macro.triggerController)} && ${getButtonCode(macro.triggerButton, macro.triggerController)})` :
   getButtonCode(macro.triggerButton, macro.triggerController)}) {
                     activeMacro = -1;
                     macroStep = 0;
-                    ${auxMotors.map(m => `${javaVarName(m.name)}.setPower(0);`).join('\n                    ')}
+                    macroStepStarted = false;
+                    ${ownedMotors.length
+                        ? ownedMotors.map(v => `${v}.setPower(0);`).join('\n                    ')
+                        : '// this macro drives no auxiliary motors'}
                 } else ` : '                '}switch (macroStep) {
 `;
 
@@ -2547,16 +3050,19 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
 `;
         break;
       case 'motor_on':
-        macroCode += `                        // Latching: set power and move on. The motor keeps running
+        macroCode += `                        ${isHold
+          ? `// Hold: powered while the trigger is held. Releasing it stops this
+                        // motor through the release check at the top of the block.`
+          : `// Latching: set power and move on. The motor keeps running
                         // after this macro finishes, until a Turn Motor Off step,
-                        // another macro, or the START cancel.
-                        ${step.motorName}.setPower(${step.motorPower});
+                        // another macro, or the START cancel.`}
+                        ${javaVarName(step.motorName)}.setPower(${step.motorPower});
                         macroStep++;
                         break;
 `;
         break;
       case 'motor_off':
-        macroCode += `                        ${step.motorName}.setPower(0);
+        macroCode += `                        ${javaVarName(step.motorName)}.setPower(0);
                         macroStep++;
                         break;
 `;
@@ -2590,20 +3096,31 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
                         break;
 `;
         break;
-      case 'motor_until_velocity':
-        macroCode += `                        if (!macroStepStarted) {
-                            ${javaVarName(step.motorName)}.setPower(${step.motorPower});
+      case 'motor_until_velocity': {
+        const v = javaVarName(step.motorName);
+        const tgt = Number(step.targetVelocity) || 0;
+        const tol = Number(step.velocityTolerance) || 100;
+        macroCode += `                        // Spin up under closed-loop velocity control and hold there.
+                        // The PID regulates against the encoder, so the speed reached is
+                        // the one asked for regardless of battery voltage — unlike setPower,
+                        // where 0.5 is a different speed every match. This step used to drive
+                        // by power and treat the target only as a wait threshold.
+                        if (!macroStepStarted) {
+                            ${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                            ${v}.setVelocity(${tgt.toFixed(1)});
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
-                        if (Math.abs(${javaVarName(step.motorName)}.getVelocity()) >= ${step.targetVelocity} || macroTimer.seconds() >= ${step.velocityTimeout}) {
-                            // Keep motor running, move to next step
+                        if (Math.abs(${v}.getVelocity() - ${tgt.toFixed(1)}) <= ${tol.toFixed(1)}
+                                || macroTimer.seconds() >= ${step.velocityTimeout}) {
+                            // Motor keeps holding its velocity; the macro moves on.
                             macroStep++;
                             macroStepStarted = false;
                         }
                         break;
 `;
         break;
+      }
       case 'wait_velocity':
         macroCode += `                        if (!macroStepStarted) {
                             macroTimer.reset();
@@ -2722,13 +3239,15 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
                         break;
 `;
         break;
-      case 'drive_to_tag':
-        macroCode += `                        // Drive to AprilTag ${step.tagId}: ${step.distance} in away, offset ${step.offset} in
+      case 'drive_to_tag': {
+        // stepIsRunnable already guaranteed this resolves.
+        const tgt = resolveTagTarget(step);
+        macroCode += `                        // Drive to ${tgt.kind === 'cluster' ? 'cell cluster "' + tgt.name + '" (tags ' + tgt.ids.join(',') + ')' : 'AprilTag ' + tgt.ids[0]}: ${step.distance} in away, offset ${step.offset} in
                         if (!macroStepStarted) {
                             macroTimer.reset();
                             macroStepStarted = true;
                         }
-                        if (stepTowardTag(${step.tagId}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
+                        if (stepTowardTarget(${tgt.javaIds}, ${tgt.kind === 'cluster' ? 'CLUSTER_OFF_X_IN, CLUSTER_OFF_Z_IN, true' : 'NO_OFFSETS, NO_OFFSETS, false'}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
                             macroStep++;
                             macroStepStarted = false;
                         } else if (macroTimer.seconds() >= TAG_SEEK_TIMEOUT) {
@@ -2741,6 +3260,7 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
                         break;
 `;
         break;
+      }
       default:
         macroCode += `                        // Unknown action type: ${step.type}
                         macroStep++;
@@ -2750,17 +3270,60 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
   });
   
   macroCode += `                    default:
-                        // Macro complete
+${isHold
+  ? `                        // Hold: every step has run, but the trigger is still down.
+                        // Park here rather than ending — clearing activeMacro would
+                        // take the release check above out of the loop, the trigger
+                        // block would re-fire next iteration, and whether a release
+                        // landed on an iteration that could see it would be chance.
+                        // That is what left the motor latched on about half the time.
+                        break;`
+  : `                        // Macro complete
                         activeMacro = -1;
                         macroStep = 0;
                         macroStepStarted = false;
-                        break;
+                        break;`}
                 }
             }
 `;
   return macroCode;
 }).join('\n')}
 ` : ''}
+${driveLayout().kind === 'mecanum' ? `            // === ORIENTATION CONTROLS ===
+            //
+            // Outside the drive block, and ahead of the heading read.
+            //
+            // Outside, because these are not drive maths — they decide which way
+            // the robot thinks downfield is, and that has to stay answerable even
+            // while a macro holds the drivetrain. Inside the block, the edge
+            // detector below also stopped updating whenever the block was
+            // skipped, so its memory went stale and a press after a macro
+            // ended fired or did not fire depending on what the flag happened
+            // to be left holding.
+            //
+            // Ahead of the heading read, so a re-zero takes effect on the same
+            // iteration rather than one loop later.
+${resetHeadingButton !== 'none' ? `            // Re-zero heading and return to field-oriented. Whatever direction the
+            // robot is physically facing becomes the new "downfield", so point it
+            // that way before pressing.
+            if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
+                headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
+                fieldOriented = true;
+            }` : '            // No re-zero button is assigned.'}
+${robotOrientedButton !== 'none' ? `${macros.length > 0 && robotOrientedButton === 'start' ? `
+            // START also cancels macros, above. When one press does both, the
+            // cancel wins and the orientation is left alone — a driver stopping
+            // a jammed mechanism is not asking to have the steering inverted as
+            // well. Assign this toggle to another button to be rid of the
+            // ambiguity; BotBuilder warns about it in Configuration Issues.
+            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev && activeMacro == -1 && !macroJustCancelled) {` : `
+            // Toggle between field- and robot-oriented. Does not touch heading.
+            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev) {`}
+                fieldOriented = !fieldOriented;
+            }
+            orientationButtonPrev = ${getButtonCode(robotOrientedButton, driverGamepad)};` : ''}
+` : `            // Tank drive is always robot-oriented, so there is no heading to
+            // reset and nothing to toggle.`}
             // Heading is read every loop, not just while driving, because the
             // telemetry below needs it even when a macro has the drivetrain.
             //
@@ -2772,25 +3335,33 @@ ${macro.behavior === 'hold' && (macro.triggerType === 'button' || macro.triggerT
             // is built for this convention.
             double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
 
-            // === DRIVE CONTROLS (disabled during macro) ===
-${macros.length > 0 ? `            if (activeMacro == -1) {` : ''}
+            // === DRIVE CONTROLS ===
+${macros.length > 0 ? (() => {
+  // Only a macro that actually steers should take the drivetrain. A macro that
+  // just spins an intake has no business freezing the driver — and driving into
+  // game elements with the intake running is the normal way to use one.
+  const steering = macros
+    .map((m, i) => ({ m, i }))
+    .filter(x => x.m.steps && x.m.steps.length > 0)
+    .filter(x => x.m.triggerType !== 'pathpilot')
+    .filter(x => !isMechanismOnly(x.m))
+    .map(x => x.i);
+  if (steering.length === 0) {
+    return `            // No configured macro steers, so the driver keeps the drivetrain
+            // and the manual mechanism controls at all times.
+            {`;
+  }
+  return `            // These macros steer, so the driver yields while one runs:
+            // ${macros.filter((m, i) => steering.includes(i)).map(m => m.name).join(', ')}
+            if (${steering.map(i => `activeMacro != ${i}`).join(' && ')}) {`;
+})() : ''}
             double forward = -${getAxisCode(driveForwardBack, driverGamepad)};
             double strafe = ${getAxisCode(driveStrafe, driverGamepad)};
             double rotate = ${getAxisCode(driveRotate, driverGamepad)};
 
-${driveLayout().kind === 'mecanum' ? `            // Re-zero heading and return to field-oriented. Whatever direction the
-            // robot is physically facing becomes the new "downfield", so point it
-            // that way before pressing.
-            if (${getButtonCode(resetHeadingButton, driverGamepad)}) {
-                headingOffset = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS);
-                fieldOriented = true;
-            }` : `            // Tank drive is always robot-oriented, so there is no heading to reset.`}
-${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `
-            // Toggle between field- and robot-oriented. Does not touch heading.
-            if (${getButtonCode(robotOrientedButton, driverGamepad)} && !orientationButtonPrev) {
-                fieldOriented = !fieldOriented;
-            }
-            orientationButtonPrev = ${getButtonCode(robotOrientedButton, driverGamepad)};` : ''}
+            // Heading re-zero and the field/robot toggle are handled above, in
+            // ORIENTATION CONTROLS — they must keep working while a macro has
+            // the drivetrain.
 
 ${slowModeButton !== 'none' ? `            // Slow mode
             double speedMultiplier = ${getButtonCode(slowModeButton, driverGamepad)} ? ${slowModeSpeed} : 1.0;
@@ -2864,11 +3435,60 @@ ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
-${macros.length > 0 ? `            } // End of activeMacro == -1 block` : ''}
+${macros.length > 0 ? `            } // End of driver-control block` : ''}
+${velocityMotors.length > 0 ? `
+            // === AT-SPEED TRACKING ===
+            //
+            // Outside the driver-control block on purpose: if a macro has taken
+            // the drivetrain the motors are still spinning, and the LED and the
+            // telemetry should keep telling the truth about them.
+            //
+            // Two mechanisms, because a bare "is it close enough" test flickers.
+            // Hysteresis widens the band once settled, so ordinary PID hunting
+            // around the target does not keep knocking it out. The dwell then
+            // requires the reading to stay inside that band for a while before
+            // it counts, which is what rejects the moment on spin-up when the
+            // motor sails through the target on its way past it.
+${velocityMotors.map(m => {
+  const v = javaVarName(m.name);
+  const tol = velTol(m);
+  return `            {
+                double err = Math.abs(${v}.getVelocity() - ${v}Target);
+                double band = ${v}AtSpeed ? ${(tol * 2).toFixed(1)} : ${tol.toFixed(1)};
+                if (${v}Target == 0 || err > band) {
+                    ${v}AtSpeed = false;
+                    ${v}BandTimer.reset();
+                } else if (${v}BandTimer.milliseconds() >= ${Number(ledDwellMs) || 200}) {
+                    ${v}AtSpeed = true;
+                }
+            }`;
+}).join('\n')}` : ''}
+${ledStatusActive ? `
+            // === STATUS LED ===
+            //
+            // Only while no macro is running: a macro's LED steps are explicit
+            // instructions from the driver, and this would overwrite them every
+            // loop. A running macro owns the LED; otherwise this does.
+            //
+            // activeMacro only exists when macros do, so with none configured
+            // this is an unguarded block rather than a reference to a field
+            // that was never declared.
+            ${macros.length > 0 ? 'if (activeMacro == -1) {' : '{'}
+                boolean shooterCommanded = ${velocityMotors.map(m => `${javaVarName(m.name)}Target != 0`).join(' || ')};
+                // A motor that was not asked to spin cannot hold anything back.
+                boolean shooterReady = ${velocityMotors.map(m => `(${javaVarName(m.name)}Target == 0 || ${javaVarName(m.name)}AtSpeed)`).join('\n                    && ')};
+                if (shooterCommanded && shooterReady) blinkin.setPosition(${ledConst(ledReadyPattern)});
+                else if (shooterCommanded)            blinkin.setPosition(${ledConst(ledSpinUpPattern)});
+                else                                  blinkin.setPosition(${ledConst(ledIdlePattern)});
+            }` : ''}
 
             // === TELEMETRY ===
+${velocityMotors.length > 0 ? `${velocityMotors.map(m => {
+  const v = javaVarName(m.name);
+  return `            telemetry.addData("${javaString(m.name)}", "%.0f / %.0f %s", ${v}.getVelocity(), ${v}Target, ${v}AtSpeed ? "AT SPEED" : (${v}Target == 0 ? "idle" : "spinning up"));`;
+}).join('\n')}` : ''}
 ${macros.length > 0 ? `            if (activeMacro != -1) {
-                telemetry.addData("MACRO", "${macros.map((m, i) => m.triggerType === 'pathpilot' ? '' : `" + (activeMacro == ${i} ? "${m.name} Step " + macroStep : "") + "`).join('')}");
+                telemetry.addData("MACRO", "${macros.map((m, i) => m.triggerType === 'pathpilot' ? '' : `" + (activeMacro == ${i} ? "${javaString(m.name)} Step " + macroStep : "") + "`).join('')}");
             }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
 ${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}
@@ -2913,7 +3533,7 @@ ${(() => {
   if (telemetryColorSensors && col.length) {
     col.forEach(sn => {
       const v = javaVarName(sn.name);
-      out.push(`            telemetry.addData("${sn.name}", "R:%d G:%d B:%d", ${v}.red(), ${v}.green(), ${v}.blue());`);
+      out.push(`            telemetry.addData("${javaString(sn.name)}", "R:%d G:%d B:%d", ${v}.red(), ${v}.green(), ${v}.blue());`);
     });
   }
   // Touch and limit switches ride along with the distance checkbox — they are
@@ -2981,20 +3601,61 @@ ${hasLimelight ? `
     }
 
     /**
-     * One iteration of driving toward a tag. Returns true once it is within
-     * tolerance. Non-blocking on purpose — a TeleOp loop that stalls stops
-     * reading the gamepad, and the driver loses the robot.
+     * Centre of a multi-tag target in camera space, inches, or null if no
+     * member is visible. x lateral (+ right), z depth.
+     *
+     * Each visible member is shifted by its own slot's offset so it reports the
+     * target's centre rather than its own, then the shifted positions are
+     * averaged. With all four in view the offsets cancel and this is just the
+     * sticker centre; with one in view it is that tag corrected toward the
+     * centre; either way the step gets the same point to drive at.
+     *
+     * requireUpright drops members whose roll is past 90 degrees. Hive cells
+     * pivot, and a flipped cell is not one you can score in — but a wall tag
+     * has no such state, so single-tag targets pass false.
+     */
+    private double[] seeTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright) {
+        if (limelight == null) return null;
+        LLResult result = limelight.getLatestResult();
+        if (result == null || !result.isValid()) return null;
+        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();
+        if (detections == null) return null;
+        double sx = 0, sz = 0;
+        int n = 0;
+        for (LLResultTypes.FiducialResult d : detections) {
+            int slot = -1;
+            for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }
+            if (slot < 0) continue;
+            Pose3D pose = d.getTargetPoseCameraSpace();
+            if (pose == null) continue;
+            if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;
+            double ox = slot < offXIn.length ? offXIn[slot] : 0;
+            double oz = slot < offZIn.length ? offZIn[slot] : 0;
+            sx += pose.getPosition().x * 39.3701 + ox;
+            sz += pose.getPosition().z * 39.3701 + oz;
+            n++;
+        }
+        if (n == 0) return null;
+        return new double[] { sx / n, sz / n };
+    }
+
+    /**
+     * One iteration of driving toward a target — a single tag or a cluster.
+     * Returns true once it is within tolerance. Non-blocking on purpose — a
+     * TeleOp loop that stalls stops reading the gamepad, and the driver loses
+     * the robot.
      *
      * offsetInches shifts the target sideways: negative left, positive right.
      */
-    private boolean stepTowardTag(int tagId, double targetInches, double offsetInches, double toleranceInches) {
-        Position p = seeTag(tagId);
+    private boolean stepTowardTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright,
+                                     double targetInches, double offsetInches, double toleranceInches) {
+        double[] p = seeTarget(ids, offXIn, offZIn, requireUpright);
         if (p == null) {
             stopDrive();
             return false;
         }
-        double xIn = p.x * 39.3701;
-        double zIn = p.z * 39.3701;
+        double xIn = p[0];
+        double zIn = p[1];
 
         double rangeError = zIn - targetInches;
         double lateralError = xIn - offsetInches;
@@ -4039,9 +4700,10 @@ Make sure your code initializes the IMU with these orientations!
                     name: `auxMotor${newId}`, 
                     type: 'gobilda_5203_26_9', 
                     hub: 'control', 
-                    port: nextFreePort('control'), 
+                    port: nextFreePort('control'),
                     reversed: false,
-                    zeroPower: 'FLOAT'
+                    zeroPower: 'FLOAT',
+                    hasEncoder: true
                   }]);
                 }}
                 className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
@@ -4199,6 +4861,36 @@ Make sure your code initializes the IMU with these orientations!
                         </select>
                       </div>
                     </div>
+                    {(() => {
+                      const typeHasOne = Number((motorSpecs(motor) || {}).ticksPerRev) > 0;
+                      const checked = motor.hasEncoder === undefined ? true : !!motor.hasEncoder;
+                      return (
+                        <div className="mt-2 flex items-start gap-3">
+                          <label className={`flex items-center gap-2 ${typeHasOne ? 'cursor-pointer' : 'opacity-50'}`}>
+                            <input
+                              type="checkbox"
+                              disabled={!typeHasOne}
+                              checked={typeHasOne && checked}
+                              onChange={(e) => {
+                                const updated = auxMotors.map(m =>
+                                  m.id === motor.id ? {...m, hasEncoder: e.target.checked} : m
+                                );
+                                setAuxMotors(updated);
+                              }}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-gray-300 text-sm">Encoder connected</span>
+                          </label>
+                          <span className="text-xs text-gray-500">
+                            {!typeHasOne
+                              ? 'This motor type has no encoder.'
+                              : checked
+                                ? 'RUN_USING_ENCODER — velocity control, position steps and at-speed LED available.'
+                                : 'RUN_WITHOUT_ENCODER — plain power only. Untick this if the encoder cable is not plugged in; with it ticked and no cable, the motor surges.'}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     <div className="mt-2 text-xs text-gray-400">
                       {motorSpecs(motor).rpm} RPM | {motorSpecs(motor).ticksPerRev} ticks/rev
                     </div>
@@ -4520,10 +5212,10 @@ Make sure your code initializes the IMU with these orientations!
           { value: 'dpad_down', label: 'D-Pad Down' },
           { value: 'dpad_left', label: 'D-Pad Left' },
           { value: 'dpad_right', label: 'D-Pad Right' },
-          // Options and Start are ONE button in the SDK, as are Share and Back.
+          // Options and Start are ONE button — the SDK gives it both names.
           // Labelled so the dropdown does not imply two.
-          { value: 'options', label: 'Options (= Start, also macro cancel)' },
-          { value: 'start', label: 'Start (= Options, also macro cancel)' },
+          { value: 'options', label: 'Options (= Start; also macro cancel)' },
+          { value: 'start', label: 'Start (= Options; also macro cancel)' },
           { value: 'left_stick_button', label: 'Left Stick Click' },
           { value: 'right_stick_button', label: 'Right Stick Click' }
         ];
@@ -4554,21 +5246,25 @@ Make sure your code initializes the IMU with these orientations!
         ];
 
         // A motor a macro latches on should not also be written every loop by a
-        // direct control, so it defaults to macro-only.
-        const latchedByMacro = (name) => (macros || []).some(m =>
-          (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
+        // direct control, so it defaults to macro-only. PathPilot-only macros
+        // do not count — they generate no TeleOp code, so nothing of theirs can
+        // be overwritten here. Must match the generator's copy.
+        const latchedByMacro = (name) => (macros || [])
+          .filter(m => m.triggerType !== 'pathpilot')
+          .some(m => (m.steps || []).some(st => ['motor_on', 'motor_off'].includes(st.type) && st.motorName === name));
 
         const getDefaultMotorControl = (motorName) => {
           if (!motorControls[motorName] && latchedByMacro(motorName)) {
             return { controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
-                     control: 'none', behavior: 'hold', power: 1.0,
+                     control: 'none', behavior: 'hold', power: 1.0, mode: 'power',
                      singleButton: 'dpad_up', singleDirection: 'forward' };
           }
-          return motorControls[motorName] || { 
+          return motorControls[motorName] || {
             controller: numControllers === 1 ? 'gamepad1' : 'gamepad2',
             control: 'trigger_pair',
             behavior: 'hold',
             power: 1.0,
+            mode: 'power',
             singleButton: 'dpad_up',
             singleDirection: 'forward'
           };
@@ -4576,10 +5272,15 @@ Make sure your code initializes the IMU with these orientations!
 
         const updateMotorControl = (motorName, field, value) => {
           const current = getDefaultMotorControl(motorName);
-          setMotorControls({
-            ...motorControls,
-            [motorName]: { ...current, [field]: value }
-          });
+          const next = { ...current, [field]: value };
+          // Switching to velocity with no target yet would command 0 and look
+          // like a dead motor. Seed 80% of free speed — fast enough to be
+          // obviously working, with headroom to tune up.
+          if (field === 'mode' && value === 'velocity' && next.velocity === undefined) {
+            const m = (auxMotors || []).find(x => x.name === motorName);
+            if (m) next.velocity = Math.round(motorMaxTicksPerSec(m) * 0.8);
+          }
+          setMotorControls({ ...motorControls, [motorName]: next });
         };
 
         const getDefaultServoControl = (servoName) => {
@@ -4810,19 +5511,108 @@ Make sure your code initializes the IMU with these orientations!
                               <option value="hold">Hold (runs while pressed)</option>
                               <option value="toggle">Toggle (press to start/stop)</option>
                             </select>
+                            {ctrl.behavior === 'toggle' && ctrl.control !== 'none' && (
+                              <span className="text-xs text-gray-500">
+                                Toggles on {(() => {
+                                  const b = toggleButtonFor(ctrl);
+                                  const names = { a:'A', b:'B', x:'X', y:'Y',
+                                    dpad_up:'D-pad Up', dpad_down:'D-pad Down',
+                                    dpad_left:'D-pad Left', dpad_right:'D-pad Right',
+                                    left_bumper:'Left Bumper', right_bumper:'Right Bumper',
+                                    left_trigger:'Left Trigger', right_trigger:'Right Trigger',
+                                    left_stick_button:'Left Stick Click', right_stick_button:'Right Stick Click',
+                                    options:'Options', start:'Start' };
+                                  return names[b] || b;
+                                })()}
+                                {['left_stick_y','right_stick_y'].includes(ctrl.control) &&
+                                  ' — a stick has no button, so pick "Single button" to choose one'}
+                              </span>
+                            )}
                           </div>
-                          <div>
-                            <label className="block text-xs text-gray-400 mb-1">Power</label>
-                            <input
-                              type="number"
-                              min="0.1"
-                              max="1.0"
-                              step="0.1"
-                              value={ctrl.power}
-                              onChange={(e) => updateMotorControl(motor.name, 'power', parseFloat(e.target.value))}
-                              className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
-                            />
-                          </div>
+                          {(() => {
+                            const blocked = velocityBlockedReason(motor);
+                            // A toggle is discrete however it is triggered; any
+                            // other scheme has to be a discrete one itself.
+                            const discrete = ctrl.behavior === 'toggle'
+                              || VELOCITY_CAPABLE_CONTROLS.includes(ctrl.control);
+                            const canVel = !blocked && discrete;
+                            const velMode = ctrl.mode === 'velocity' && canVel;
+                            const maxTps = motorMaxTicksPerSec(motor);
+                            const vel = Number(ctrl.velocity) || 0;
+                            const rpm = motorSpecs(motor).ticksPerRev
+                              ? (vel * 60) / motorSpecs(motor).ticksPerRev : 0;
+                            return (
+                              <>
+                                <div>
+                                  <label className="block text-xs text-gray-400 mb-1">Drive by</label>
+                                  <select
+                                    value={velMode ? 'velocity' : 'power'}
+                                    disabled={!canVel}
+                                    onChange={(e) => updateMotorControl(motor.name, 'mode', e.target.value)}
+                                    className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm disabled:opacity-50"
+                                  >
+                                    <option value="power">Power (0–1)</option>
+                                    <option value="velocity">Velocity (ticks/sec)</option>
+                                  </select>
+                                  {blocked && (
+                                    <span className="text-xs text-yellow-500">Velocity unavailable — {blocked}.</span>
+                                  )}
+                                  {!blocked && !discrete && (
+                                    <span className="text-xs text-yellow-500">
+                                      Velocity is not available on a stick — an axis has no fixed target to hold.
+                                      Pick buttons, bumpers, triggers or D-pad, or switch Behavior to Toggle.
+                                    </span>
+                                  )}
+                                </div>
+                                {velMode ? (
+                                  <>
+                                    <div>
+                                      <label className="block text-xs text-gray-400 mb-1">Target velocity</label>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        max={Math.round(maxTps)}
+                                        step="10"
+                                        value={ctrl.velocity !== undefined ? ctrl.velocity : Math.round(maxTps * 0.8)}
+                                        onChange={(e) => updateMotorControl(motor.name, 'velocity', parseFloat(e.target.value))}
+                                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                                      />
+                                      <span className="text-xs text-gray-500">
+                                        ≈{Math.round(rpm)} rpm · max {Math.round(maxTps)}
+                                      </span>
+                                    </div>
+                                    <div>
+                                      <label className="block text-xs text-gray-400 mb-1">At-speed tolerance</label>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        step="10"
+                                        value={ctrl.velocityTolerance !== undefined ? ctrl.velocityTolerance : 100}
+                                        onChange={(e) => updateMotorControl(motor.name, 'velocityTolerance', parseFloat(e.target.value))}
+                                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                                      />
+                                      <span className="text-xs text-gray-500">
+                                        ± ticks/sec. Doubles once settled.
+                                      </span>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Power</label>
+                                    <input
+                                      type="number"
+                                      min="0.1"
+                                      max="1.0"
+                                      step="0.1"
+                                      value={ctrl.power}
+                                      onChange={(e) => updateMotorControl(motor.name, 'power', parseFloat(e.target.value))}
+                                      className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                                    />
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
                           {ctrl.control === 'single' && (
                             <>
                               <div>
@@ -5166,7 +5956,10 @@ Make sure your code initializes the IMU with these orientations!
             driveDistance: 12,
             drivePower: 0.5,
             targetHeading: 0,
-            // Drive to tag fields
+            // Drive to tag fields. A new step aims at the first cluster if any
+            // exist, else the first single tag — never a bare number.
+            target: (clusters || []).length ? `cluster:${clusters[0].id}`
+                  : ((targetTags || []).length ? `tag:${targetTags[0].tagId}` : 'tag:21'),
             tagId: 21,
             distance: 24,
             offset: 0,
@@ -5178,7 +5971,8 @@ Make sure your code initializes the IMU with these orientations!
             motorDuration: 1.0,
             // Velocity fields
             targetVelocity: 1000,
-            velocityCondition: 'above', // 'above' or 'below'
+            velocityTolerance: 100,     // ticks/sec band that counts as "at speed"
+            velocityCondition: 'above', // 'above' or 'below' — wait_velocity only
             velocityTimeout: 3.0,
             // Servo fields
             servoName: servos.length > 0 ? servos[0].name : '',
@@ -5327,13 +6121,45 @@ Make sure your code initializes the IMU with these orientations!
               return (
                 <div className="grid grid-cols-4 gap-2 mt-2">
                   <div>
-                    <label className="block text-xs text-gray-400">Tag ID</label>
-                    <input
-                      type="number"
-                      value={step.tagId}
-                      onChange={(e) => updateStep(macro.id, step.id, 'tagId', parseInt(e.target.value))}
-                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
-                    />
+                    <label className="block text-xs text-gray-400">Target</label>
+                    {(() => {
+                      // Old steps stored only tagId; new ones store target.
+                      const current = step.target || (step.tagId !== undefined ? `tag:${step.tagId}` : '');
+                      const resolved = resolveTagTarget(step);
+                      // A hand-typed tag ID that is not in the Tags list still has
+                      // to appear, or an old macro's selection vanishes on load.
+                      const knownTag = (targetTags || []).some(t => `tag:${t.tagId}` === current);
+                      const orphanTag = current.startsWith('tag:') && !knownTag ? current : null;
+                      return (
+                        <>
+                          <select
+                            value={current}
+                            onChange={(e) => updateStep(macro.id, step.id, 'target', e.target.value)}
+                            className={`w-full bg-gray-700 border rounded px-2 py-1 text-white text-sm ${resolved ? 'border-gray-600' : 'border-red-500'}`}
+                          >
+                            {!current && <option value="">— pick a target —</option>}
+                            {(clusters || []).length > 0 && (
+                              <optgroup label="Hive cells (any tag of the four)">
+                                {clusters.map(c => (
+                                  <option key={`c${c.id}`} value={`cluster:${c.id}`}>
+                                    {c.name} — {c.alliance === 'B' ? 'blue' : 'red'}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                            <optgroup label="Single tags">
+                              {(targetTags || []).map(t => (
+                                <option key={`t${t.id}`} value={`tag:${t.tagId}`}>{t.name} (ID {t.tagId})</option>
+                              ))}
+                              {orphanTag && <option value={orphanTag}>ID {orphanTag.split(':')[1]} (not in Tags list)</option>}
+                            </optgroup>
+                          </select>
+                          {!resolved && current && (
+                            <span className="text-xs text-red-400">Target no longer exists.</span>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <div>
                     <label className="block text-xs text-gray-400">Distance (in)</label>
@@ -5498,22 +6324,35 @@ Make sure your code initializes the IMU with these orientations!
                     <label className="block text-xs text-gray-400">Target (ticks/sec)</label>
                     <input
                       type="number"
+                      step="10"
                       value={step.targetVelocity}
                       onChange={(e) => updateStep(macro.id, step.id, 'targetVelocity', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                    {(() => {
+                      const m = auxMotors.find(x => x.name === step.motorName);
+                      const max = m ? motorMaxTicksPerSec(m) : 0;
+                      const tpr = m ? (motorSpecs(m).ticksPerRev || 0) : 0;
+                      const rpm = tpr ? (Number(step.targetVelocity) || 0) * 60 / tpr : 0;
+                      if (!m) return null;
+                      return (
+                        <span className={`text-xs ${Math.abs(Number(step.targetVelocity) || 0) > max ? 'text-red-400' : 'text-gray-500'}`}>
+                          ≈{Math.round(rpm)} rpm · max {Math.round(max)}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400">Power</label>
+                    <label className="block text-xs text-gray-400">Tolerance (± ticks/sec)</label>
                     <input
                       type="number"
-                      min="-1.0"
-                      max="1.0"
-                      step="0.1"
-                      value={step.motorPower}
-                      onChange={(e) => updateStep(macro.id, step.id, 'motorPower', parseFloat(e.target.value))}
+                      min="1"
+                      step="10"
+                      value={step.velocityTolerance !== undefined ? step.velocityTolerance : 100}
+                      onChange={(e) => updateStep(macro.id, step.id, 'velocityTolerance', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                    <span className="text-xs text-gray-500">proceeds once inside this band</span>
                   </div>
                   <div>
                     <label className="block text-xs text-gray-400">Timeout (sec)</label>
@@ -5524,6 +6363,11 @@ Make sure your code initializes the IMU with these orientations!
                       onChange={(e) => updateStep(macro.id, step.id, 'velocityTimeout', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                  </div>
+                  <div className="col-span-4 text-xs text-gray-400">
+                    Holds the motor at the target under closed-loop control and moves on once it
+                    gets there (or the timeout passes). The motor keeps running afterwards — use
+                    Turn Motor Off to stop it.
                   </div>
                 </div>
               );
@@ -6224,7 +7068,7 @@ Make sure your code initializes the IMU with these orientations!
                 Reverse Direction for any that are backwards. Triggers give variable power, useful for finding the
                 lowest power that moves the robot from a standstill.</p>
               ) : codeOutputMode === 'calibration' ? (
-                <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets. Motor names come from this configuration, so there is nothing to hand-edit. Includes a <strong>port scan</strong> — push the robot and see which ports actually move, so a mis-wired pod is visible instead of silently reading zero.</p>
+                <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets in five tests: port scan, straight push, two-push strafe, spin, verify. Motor names come from this configuration, so there is nothing to hand-edit. The <strong>port scan</strong> shows which ports actually move, so a mis-wired pod is visible instead of silently reading zero; the <strong>two-push strafe</strong> catches a reversed pod by checking that left and right disagree in sign.</p>
               ) : (
                 <p>📋 <strong>Config Snippet:</strong> Just the constants and initialization code. Paste into your own OpMode.</p>
               )}
@@ -6260,13 +7104,15 @@ Make sure your code initializes the IMU with these orientations!
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
                 <ol className="text-green-200 space-y-1 list-decimal list-inside">
                   <li>Paste into OnBot Java as <code className="bg-green-800 px-1 rounded">{javaClassName(robotName, 'OdometryCalibration')}.java</code> and Build</li>
-                  <li>Run it, then start on <strong>Test 0 (port scan)</strong> and push the robot — confirm the moving ports are the two named as your pods</li>
-                  <li>Test 1: push forward exactly 48" (two tiles), press B</li>
-                  <li>Test 2: push left exactly 48", press B</li>
-                  <li>Test 3: spin 10 turns clockwise about a fixed point, press B</li>
-                  <li>Type the four results into the <strong>Odometry</strong> tab, then re-export your profile</li>
+                  <li>Run it. <strong>D-pad Down</strong> moves to the next test, <strong>D-pad Up</strong> goes back, <strong>A</strong> re-zeros the current test, <strong>B</strong> records a reading</li>
+                  <li><strong>Test 1 — Port scan:</strong> push the robot and confirm the two ports that move are the ones named as your pods</li>
+                  <li><strong>Test 2 — Straight:</strong> push forward exactly 48" (two tiles), press B</li>
+                  <li><strong>Test 3 — Strafe, two pushes:</strong> push the robot's LEFT exactly 48", press B — then push its RIGHT exactly 48", press B. The DS reports GOOD, REVERSED, or a sign problem. If it says REVERSED, tick Reverse on that pod here and regenerate</li>
+                  <li><strong>Test 4 — Spin:</strong> rotate 10 turns clockwise about a fixed point, press B</li>
+                  <li><strong>Test 5 — Verify:</strong> type the four results into the <strong>Odometry</strong> tab, regenerate, run again, push a square and check the pose returns near 0,0</li>
+                  <li>Re-export your robot profile so PathPilot picks up the measured values</li>
                 </ol>
-                <p className="text-green-300 mt-2 text-xs">Push slowly and keep the robot square — the cross-axis drift readout tells you if you are skewing it.</p>
+                <p className="text-green-300 mt-2 text-xs">Push slowly and keep the robot square — the cross-axis drift readout tells you if you are skewing it. The strafe test needs both pushes; after the first the DS asks for the second.</p>
               </div>
             )}
             {codeOutputMode === 'teleop' && (
@@ -6541,6 +7387,102 @@ Make sure your code initializes the IMU with these orientations!
                     ))}
                   </div>
                 </div>
+
+                {/* Status LED — drives the Blinkin from velocity at-speed state. */}
+                {(() => {
+                  const velMotors = (auxMotors || []).filter(m => isVelocityMotor(m));
+                  // Set to velocity, but not actually being driven by it. Shown
+                  // here because "no motor uses velocity" is a baffling thing to
+                  // read right after setting one to velocity.
+                  const ignored = (auxMotors || [])
+                    .map(m => ({ m, why: velocityIgnoredReason(m) }))
+                    .filter(x => x.why);
+                  const patternPicker = (value, setter, label) => (
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">{label}</label>
+                      <select
+                        value={value}
+                        onChange={(e) => setter(e.target.value)}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      >
+                        <option value="">— pick a pattern —</option>
+                        {blinkinPatterns.map(p => (
+                          <option key={p.id} value={p.name}>{p.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                  return (
+                    <div className="bg-gray-700 p-4 rounded-lg">
+                      <label className="flex items-center gap-2 mb-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={ledStatusEnabled}
+                          onChange={(e) => setLedStatusEnabled(e.target.checked)}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-lg font-semibold text-blue-400">Shooter status LED</span>
+                      </label>
+                      <p className="text-xs text-gray-400 mb-3">
+                        A velocity-controlled motor gives the driver nothing to go on — it sounds the
+                        same at 1800 and 2000 ticks/sec. This drives the LED from whether every
+                        velocity motor has actually settled at its target, so the driver can see when
+                        it is safe to fire. A running macro's own LED steps take priority.
+                      </p>
+
+                      {ledStatusEnabled && (
+                        <>
+                          {velMotors.length === 0 && ignored.length === 0 && (
+                            <div className="text-sm text-yellow-400 mb-3">
+                              No motor uses velocity control yet, so there is nothing to report.
+                              Set one to "Velocity" in the Controls tab.
+                            </div>
+                          )}
+                          {velMotors.length > 0 && (
+                            <div className="text-xs text-gray-400 mb-3">
+                              Watching: {velMotors.map(m => m.name).join(', ')} — green only when
+                              every one of them is at its target.
+                            </div>
+                          )}
+                          {ignored.length > 0 && (
+                            <div className="text-sm text-yellow-400 mb-3 space-y-1">
+                              {ignored.map(({ m, why }) => (
+                                <div key={m.id}>
+                                  <strong>{m.name}</strong> is set to velocity but is being driven by
+                                  power, because {why}. Fix that in the Controls tab and it will be watched.
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          <div className="grid grid-cols-4 gap-2">
+                            {patternPicker(ledReadyPattern, setLedReadyPattern, 'Ready (all at speed)')}
+                            {patternPicker(ledSpinUpPattern, setLedSpinUpPattern, 'Spinning up')}
+                            {patternPicker(ledIdlePattern, setLedIdlePattern, 'Idle (none running)')}
+                            <div>
+                              <label className="block text-xs text-gray-400 mb-1">Dwell</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="50"
+                                value={ledDwellMs}
+                                onChange={(e) => setLedDwellMs(parseFloat(e.target.value) || 0)}
+                                className="w-full bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                              />
+                              <span className="text-xs text-gray-500">
+                                ms in band before "ready"
+                              </span>
+                            </div>
+                          </div>
+                          {blinkinPatterns.length === 0 && (
+                            <div className="text-sm text-yellow-400 mt-3">
+                              Add some LED patterns above first — there is nothing to choose from.
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
               </>
             )}
           </div>
@@ -6621,6 +7563,108 @@ Make sure your code initializes the IMU with these orientations!
                     </button>
                   </div>
                 ))}
+              </div>
+            </div>
+
+            {/* Clusters: several tags that mean one target. */}
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <div className="flex justify-between items-center mb-3">
+                <h4 className="text-lg font-semibold text-blue-400">Hive Cell Clusters</h4>
+                <button
+                  onClick={() => {
+                    const newId = clusters.length > 0 ? Math.max(...clusters.map(c => c.id)) + 1 : 1;
+                    setClusters([...clusters, { id: newId, name: `cluster${newId}`, alliance: 'R', tagIds: ['', '', '', ''] }]);
+                  }}
+                  className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm"
+                >
+                  + Add Cluster
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mb-3">
+                BIOBUZZ puts four tags on one sticker under each hive cell. A Drive to AprilTag step
+                aimed at a cluster keeps going on whichever of the four it can see, instead of stopping
+                because one ID went out of view. The pre-filled IDs for the two "opposite" cells follow
+                the manual's pattern — confirm them against Figure 9-17.
+              </p>
+
+              <div className="space-y-2">
+                {clusters.map(c => (
+                  <div key={c.id} className="flex gap-2 items-center bg-gray-600 p-2 rounded">
+                    <input
+                      type="text"
+                      value={c.name}
+                      onChange={(e) => setClusters(clusters.map(x => x.id === c.id ? {...x, name: e.target.value} : x))}
+                      className="w-28 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                      placeholder="Name"
+                    />
+                    <select
+                      value={c.alliance}
+                      onChange={(e) => setClusters(clusters.map(x => x.id === c.id ? {...x, alliance: e.target.value} : x))}
+                      className="bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                    >
+                      <option value="R">Red</option>
+                      <option value="B">Blue</option>
+                    </select>
+                    {[0, 1, 2, 3].map(i => (
+                      <input
+                        key={i}
+                        type="number"
+                        value={c.tagIds[i] !== undefined ? c.tagIds[i] : ''}
+                        onChange={(e) => {
+                          const v = e.target.value === '' ? '' : parseInt(e.target.value);
+                          setClusters(clusters.map(x => {
+                            if (x.id !== c.id) return x;
+                            const ids = [...(x.tagIds || ['', '', '', ''])];
+                            ids[i] = v;
+                            return {...x, tagIds: ids};
+                          }));
+                        }}
+                        className="w-14 bg-gray-700 border border-gray-500 rounded px-2 py-1 text-white text-sm"
+                        placeholder={`#${i + 1}`}
+                      />
+                    ))}
+                    <button
+                      onClick={() => setClusters(clusters.filter(x => x.id !== c.id))}
+                      className="text-red-400 hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4">
+                <h5 className="text-sm font-semibold text-gray-300 mb-1">Tag positions on the sticker</h5>
+                <p className="text-xs text-gray-400 mb-2">
+                  Inches from each tag's centre to the cell opening, as the camera sees it: x is sideways
+                  (+ right), z is depth (+ further away). Same sticker on every cell, so one set covers all
+                  four clusters. Slot 1 pairs with the first ID above, slot 2 with the second, and so on.
+                  Leave at 0 until measured — any visible tag still finds the cluster, it just aims at
+                  that tag instead of the opening.
+                </p>
+                <div className="grid grid-cols-4 gap-2">
+                  {[0, 1, 2, 3].map(i => (
+                    <div key={i} className="bg-gray-600 p-2 rounded">
+                      <div className="text-xs text-gray-400 mb-1">Slot {i + 1}</div>
+                      <div className="flex gap-1 items-center">
+                        <span className="text-xs text-gray-500">x</span>
+                        <input
+                          type="number" step="0.25"
+                          value={clusterTagOffsets[i]?.x ?? 0}
+                          onChange={(e) => setClusterTagOffsets(clusterTagOffsets.map((o, j) => j === i ? {...o, x: parseFloat(e.target.value) || 0} : o))}
+                          className="w-full bg-gray-700 border border-gray-500 rounded px-1 py-1 text-white text-sm"
+                        />
+                        <span className="text-xs text-gray-500">z</span>
+                        <input
+                          type="number" step="0.25"
+                          value={clusterTagOffsets[i]?.z ?? 0}
+                          onChange={(e) => setClusterTagOffsets(clusterTagOffsets.map((o, j) => j === i ? {...o, z: parseFloat(e.target.value) || 0} : o))}
+                          className="w-full bg-gray-700 border border-gray-500 rounded px-1 py-1 text-white text-sm"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           </div>
@@ -6904,6 +7948,15 @@ Make sure your code initializes the IMU with these orientations!
             </label>
           </div>
         </div>
+
+        {/* Browser storage problem. Separate from configuration warnings: this
+            is about whether saving works at all, not about the robot. */}
+        {storageError && (
+          <div className="mt-4 bg-gray-800 border border-red-600 rounded-lg p-3">
+            <h4 className="text-red-400 font-semibold mb-1">💾 Browser Storage</h4>
+            <div className="text-sm text-red-300">{storageError}</div>
+          </div>
+        )}
 
         {/* Validation Warnings */}
         {validationWarnings.length > 0 && (
