@@ -267,6 +267,10 @@ const FTCRobotConfigurator = () => {
 
   // Macros Configuration
   const [macros, setMacros] = React.useState([]);
+  // Rules: WHEN <sensor/motor/button condition> THEN <action>. Evaluated every
+  // loop after the driver's controls, so a rule's decision stands — that is
+  // what the rule is for. Empty by default: no rules, no generated code.
+  const [rules, setRules] = React.useState([]);
   const [editingMacroId, setEditingMacroId] = React.useState(null);
   const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
 
@@ -706,6 +710,72 @@ const FTCRobotConfigurator = () => {
    * Returns { kind, ids, name, javaIds } or null when the reference is dangling.
    */
   const CLUSTER_CONST = (c) => `CLUSTER_${String(c.name).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_IDS`;
+  // The Limelight target helper, shared by the TeleOp generator and the robot
+  // profile (javaHelpers.seeTarget) so PathPilot runs the same code TeleOp does.
+  const SEE_TARGET_JAVA = [
+    '    /**',
+    '     * Centre of a multi-tag target in camera space, inches, or null if no',
+    '     * member is visible. x lateral (+ right), z depth.',
+    '     *',
+    '     * Each visible member is shifted by its own slot\'s offset so it reports the',
+    '     * target\'s centre rather than its own, then the shifted positions are',
+    '     * averaged. With all four in view the offsets cancel and this is just the',
+    '     * sticker centre; with one in view it is that tag corrected toward the',
+    '     * centre; either way the step gets the same point to drive at.',
+    '     *',
+    '     * requireUpright drops members whose roll is past 90 degrees. Hive cells',
+    '     * pivot, and a flipped cell is not one you can score in — but a wall tag',
+    '     * has no such state, so single-tag targets pass false.',
+    '     */',
+    '    private double[] seeTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright) {',
+    '        if (limelight == null) return null;',
+    '        LLResult result = limelight.getLatestResult();',
+    '        if (result == null || !result.isValid()) return null;',
+    '        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();',
+    '        if (detections == null) return null;',
+    '        double sx = 0, sz = 0;',
+    '        int n = 0;',
+    '        for (LLResultTypes.FiducialResult d : detections) {',
+    '            int slot = -1;',
+    '            for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }',
+    '            if (slot < 0) continue;',
+    '            Pose3D pose = d.getTargetPoseCameraSpace();',
+    '            if (pose == null) continue;',
+    '            if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;',
+    '            double ox = slot < offXIn.length ? offXIn[slot] : 0;',
+    '            double oz = slot < offZIn.length ? offZIn[slot] : 0;',
+    '            sx += pose.getPosition().x * 39.3701 + ox;',
+    '            sz += pose.getPosition().z * 39.3701 + oz;',
+    '            n++;',
+    '        }',
+    '        if (n == 0) return null;',
+    '        return new double[] { sx / n, sz / n };',
+    '    }',
+  ];
+  // Visibility-only wrapper, used by Rules. Emitted in TeleOp only when a rule
+  // needs it, so a robot without tag rules generates exactly what it did before.
+  const TARGET_VISIBLE_JAVA = [
+    '    /** True when any member of the target is in view (and upright, if required). */',
+    '    private boolean targetVisible(int[] ids, boolean requireUpright) {',
+    '        return seeTarget(ids, NO_OFFSETS, NO_OFFSETS, requireUpright) != null;',
+    '    }'
+  ];
+
+  // Cluster constants as Java lines. TeleOp emits them; the profile ships them
+  // (javaHelpers.clusterJava) so PathPilot's seeTarget sees the same names.
+  const clusterConstantsJava = () => [
+    '    // AprilTag clusters: several tags, one target. Any visible member locates',
+    '    // the cell, and the step keeps driving on whichever one is in view instead',
+    '    // of stalling because the one ID it wanted went behind a ball.',
+    ...(clusters || []).map(c => `    private static final int[] ${CLUSTER_CONST(c)} = { ${(c.tagIds || []).map(Number).filter(n => !Number.isNaN(n)).join(', ')} };   // ${c.alliance === 'B' ? 'blue' : 'red'}, "${javaString(c.name)}"`),
+    '    // Where each tag sits relative to the cell opening, inches, in the camera\'s',
+    '    // view (x lateral + right, z depth + further). Every cell uses the same',
+    '    // sticker, so one set serves all clusters. Slot i pairs with ids[i].',
+    `    private static final double[] CLUSTER_OFF_X_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.x) || 0).toFixed(2)).join(', ')} };`,
+    `    private static final double[] CLUSTER_OFF_Z_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.z) || 0).toFixed(2)).join(', ')} };`,
+    '    private static final double[] NO_OFFSETS = { 0, 0, 0, 0 };'
+  ];
+
   const resolveTagTarget = (st) => {
     const t = st.target || (st.tagId !== undefined ? `tag:${st.tagId}` : null);
     if (!t) return null;
@@ -831,6 +901,201 @@ const FTCRobotConfigurator = () => {
 
   const driverPad = () => (gamepad1Role === 'driver' ? 'gamepad1' : 'gamepad2');
 
+  // ------------------------------------------------------------------
+  // Rules → Java. Shared by the TeleOp generator and the robot profile so
+  // PathPilot receives exactly the expressions TeleOp runs.
+  //
+  // A rule is { name, enabled, mode: 'while' | 'latch', runInAuto,
+  //             conditions: [cond, cond?], action }.
+  // Conditions are ANDed. Kinds:
+  //   color    { sensor, color: red|blue|green|any|none, ratio, min }
+  //   distance { sensor, op: '<' | '>', inches }
+  //   velocity { motor, op: above|below, value }
+  //   button   { controller, button }
+  //   touch    { sensor }
+  // Actions:
+  //   motor_power { motor, power }   motor_velocity { motor, velocity }
+  //   motor_stop  { motor }          servo_position { servo, position }
+  //   led         { pattern }
+  // ------------------------------------------------------------------
+  const RULE_COLOR_CHAR = { red: 'R', green: 'G', blue: 'B', any: 'A', none: 'A' };
+
+  // The one helper rules need in the generated class. Dominant-channel test:
+  // the wanted channel must beat each of the others by `ratio`, and the total
+  // must clear `min` so an empty view (all channels low) never counts.
+  const RULE_SEES_COLOR_JAVA = [
+    '    /**',
+    '     * Dominant-channel colour test for the Rules block. ratio is how much the',
+    '     * wanted channel must beat each of the others; min is a brightness floor',
+    '     * that rejects "nothing in front of the sensor". Tune both from the raw',
+    '     * R/G/B telemetry with and without a ball present.',
+    '     */',
+    '    private static boolean seesColor(ColorSensor s, char color, double ratio, int min) {',
+    '        int r = s.red(), g = s.green(), b = s.blue();',
+    '        if (r + g + b < min) return false;',
+    '        switch (color) {',
+    '            case \'R\': return r > g * ratio && r > b * ratio;',
+    '            case \'G\': return g > r * ratio && g > b * ratio;',
+    '            case \'B\': return b > r * ratio && b > g * ratio;',
+    '            default:  return true;   // any colour: something bright is there',
+    '        }',
+    '    }'
+  ];
+
+  const ruleSensor = (name) => (sensors || []).find(s => s.name === name);
+  const ruleSensorKind = (name) => (sensorDatabase[(ruleSensor(name) || {}).type] || {}).type;
+  const ruleSensorJavaType = (name) => (sensorDatabase[(ruleSensor(name) || {}).type] || {}).javaType;
+
+  /** Java boolean expression for one condition, or null if it cannot be built. */
+  const ruleConditionJava = (c) => {
+    const num = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v !== null) ? Number(v) : d;
+    switch (c.type) {
+      case 'color': {
+        if (!ruleSensor(c.sensor)) return null;
+        const v = javaVarName(c.sensor);
+        const ch = RULE_COLOR_CHAR[c.color] || 'A';
+        const expr = `seesColor(${v}, '${ch}', ${num(c.ratio, 1.4)}, ${Math.round(num(c.min, 300))})`;
+        return c.color === 'none' ? `!${expr}` : expr;
+      }
+      case 'distance': {
+        if (!ruleSensor(c.sensor)) return null;
+        const v = javaVarName(c.sensor);
+        // REV Color V3 implements DistanceSensor as well; the cast is a no-op
+        // on a true distance sensor and unlocks the colour sensor's range read.
+        return `((DistanceSensor) ${v}).getDistance(DistanceUnit.INCH) ${c.op === '>' ? '>' : '<'} ${num(c.inches, 2)}`;
+      }
+      case 'velocity': {
+        if (!(auxMotors || []).some(m => m.name === c.motor)) return null;
+        const v = javaVarName(c.motor);
+        return `Math.abs(${v}.getVelocity()) ${c.op === 'below' ? '<' : '>'} ${num(c.value, 1000)}`;
+      }
+      case 'button': {
+        const pad = c.controller === 'gamepad2' ? 'gamepad2' : 'gamepad1';
+        const b = c.button || 'a';
+        if (b === 'left_trigger' || b === 'right_trigger') return `(${pad}.${b} > 0.5)`;
+        return `${pad}.${b}`;
+      }
+      case 'touch': {
+        if (!ruleSensor(c.sensor)) return null;
+        const v = javaVarName(c.sensor);
+        // TouchSensor reports pressed directly; a raw digital channel reads
+        // LOW when the switch closes.
+        return ruleSensorJavaType(c.sensor) === 'DigitalChannel' ? `!${v}.getState()` : `${v}.isPressed()`;
+      }
+      case 'tag': {
+        // A single tag or a whole cluster; clusters also require the cell to be
+        // upright, since a flipped cell is not one you can score in.
+        if (!hasLimelight) return null;
+        const tgt = resolveTagTarget({ target: c.target });
+        if (!tgt) return null;
+        const expr = `targetVisible(${tgt.javaIds}, ${tgt.upright})`;
+        return c.negate ? `!${expr}` : expr;
+      }
+      default: return null;
+    }
+  };
+
+  /** Java statements for the action, as an array of lines (no indent). */
+  const ruleActionJava = (a, velocityMotorNames) => {
+    const num = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v !== null) ? Number(v) : d;
+    const isVel = (n) => (velocityMotorNames || []).includes(n);
+    switch (a.type) {
+      case 'motor_power': {
+        if (!(auxMotors || []).some(m => m.name === a.motor)) return null;
+        const v = javaVarName(a.motor);
+        return [...(isVel(a.motor) ? [`${v}Target = 0;`] : []), `${v}.setPower(${num(a.power, 0.5)});`];
+      }
+      case 'motor_velocity': {
+        if (!(auxMotors || []).some(m => m.name === a.motor)) return null;
+        const v = javaVarName(a.motor);
+        return isVel(a.motor)
+          ? [`${v}Target = ${num(a.velocity, 1000)};`, `${v}.setVelocity(${v}Target);`]
+          : [`${v}.setVelocity(${num(a.velocity, 1000)});`];
+      }
+      case 'motor_stop': {
+        if (!(auxMotors || []).some(m => m.name === a.motor)) return null;
+        const v = javaVarName(a.motor);
+        return [...(isVel(a.motor) ? [`${v}Target = 0;`] : []), `${v}.setPower(0);`];
+      }
+      case 'servo_position': {
+        if (!(servos || []).some(s => s.name === a.servo)) return null;
+        return [`${javaVarName(a.servo)}.setPosition(${num(a.position, 0.5)});`];
+      }
+      case 'led': {
+        if (!hasBlinkin || !(blinkinPatterns || []).some(p => p.name === a.pattern)) return null;
+        return [`blinkin.setPosition(BLINKIN_${String(a.pattern).toUpperCase().replace(/\s+/g, '_')});`];
+      }
+      case 'start_macro': {
+        // Hands off to the macro state machine. Only when nothing else is
+        // running — one macro at a time is the rule everywhere else too.
+        const idx = (macros || []).findIndex(m => String(m.id) === String(a.macroId));
+        if (idx < 0 || !teleopMacroIndex(idx)) return null;
+        return [`if (activeMacro == -1) {`,
+                `    activeMacro = ${idx};`, `    macroStep = 0;`, `    macroStepStarted = false;`, `    macroTimer.reset();`,
+                `}`];
+      }
+      default: return null;
+    }
+  };
+
+  // A macro that generates TeleOp execution code: has steps and is not
+  // PathPilot-only. Mirrors the filter the MACRO EXECUTION block applies.
+  const teleopMacroIndex = (idx) => {
+    const m = (macros || [])[idx];
+    return !!(m && (m.steps || []).length > 0 && m.triggerType !== 'pathpilot');
+  };
+
+  /** Why a rule cannot be generated, or null if it is fine. */
+  const ruleProblem = (r) => {
+    const conds = (r.conditions || []);
+    if (conds.length === 0) return 'has no condition';
+    for (const c of conds) {
+      if ((c.type === 'color' || c.type === 'distance' || c.type === 'touch') && !ruleSensor(c.sensor)) return `refers to sensor "${c.sensor || '?'}", which is not in the Sensors tab`;
+      if (c.type === 'color' && ruleSensorKind(c.sensor) !== 'color') return `"${c.sensor}" is not a colour sensor`;
+      if (c.type === 'distance' && !['color', 'distance'].includes(ruleSensorKind(c.sensor))) return `"${c.sensor}" cannot measure distance`;
+      if (c.type === 'touch' && !['touch', 'limit'].includes(ruleSensorKind(c.sensor))) return `"${c.sensor}" is not a touch or limit sensor`;
+      if (c.type === 'velocity') {
+        const m = (auxMotors || []).find(x => x.name === c.motor);
+        if (!m) return `refers to motor "${c.motor || '?'}", which is not an auxiliary motor`;
+        if (!hasEncoder(m)) return `reads velocity from "${c.motor}", which has no encoder`;
+      }
+      if (c.type === 'tag') {
+        if (!hasLimelight) return 'looks for an AprilTag, but the Limelight is turned off in the Limelight tab';
+        if (!resolveTagTarget({ target: c.target })) return 'has no tag or cluster chosen';
+      }
+      if (ruleConditionJava(c) === null) return 'has an incomplete condition';
+    }
+    const actionProblem = (a, label) => {
+      if (!a || !a.type) return `has no ${label}`;
+      if (a.type === 'motor_velocity') {
+        const m = (auxMotors || []).find(x => x.name === a.motor);
+        if (m && !hasEncoder(m)) return `${label} sets a velocity on "${a.motor}", which has no encoder`;
+      }
+      if (a.type === 'start_macro') {
+        const idx = (macros || []).findIndex(m => String(m.id) === String(a.macroId));
+        if (idx < 0) return `${label} starts a macro that no longer exists`;
+        if (!teleopMacroIndex(idx)) return `${label} starts "${macros[idx].name}", which is PathPilot-only or has no steps — it has no TeleOp code to run`;
+      }
+      if (ruleActionJava(a, []) === null) return `has an incomplete ${label}`;
+      return null;
+    };
+    const ap = actionProblem(r.action, 'action');
+    if (ap) return ap;
+    if (r.elseAction && r.elseAction.type) {
+      const ep = actionProblem(r.elseAction, 'ELSE action');
+      if (ep) return ep;
+      if (r.mode === 'latch') return 'has an ELSE action, which only makes sense for a While rule (a latched rule never returns to ELSE until START)';
+      if (r.elseAction.type === 'start_macro' && conds.length < 2) return 'has an ELSE that starts a macro but only one condition — add a second condition to decide between THEN and ELSE (the first is the trigger)';
+    }
+    return null;
+  };
+
+  const activeRules = () => (rules || []).filter(r => r.enabled !== false && !ruleProblem(r));
+  const rulesNeedDistance = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'distance'));
+  const rulesNeedColor = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'color'));
+  const ruleHasElse = (r) => !!(r.elseAction && r.elseAction.type);
+  const rulesNeedTag = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'tag'));
+
   const getValidationWarnings = () => {
     const warnings = [];
     
@@ -950,6 +1215,24 @@ const FTCRobotConfigurator = () => {
         warnings.push({ type: 'error', message: `Drive ramp time is ${driveRampMs} ms. It must be between 0 (no ramp) and 1000.` });
       }
     }
+
+    // Rules. A rule that cannot be generated is skipped with a comment in the
+    // code; say so here too, where it is easier to see.
+    (rules || []).forEach((r, i) => {
+      if (r.enabled === false) return;
+      const problem = ruleProblem(r);
+      if (problem) warnings.push({ type: 'error', message: `Rule "${r.name || `#${i + 1}`}" ${problem}. It will not be generated.` });
+    });
+    (() => {
+      // Two rules writing the same motor fight every loop; the later one wins
+      // silently. Worth a warning, not an error — it can be intentional with
+      // conditions that never overlap.
+      const byMotor = {};
+      activeRules().forEach(r => { const m = r.action && r.action.motor; if (m) (byMotor[m] = byMotor[m] || []).push(r.name); });
+      Object.entries(byMotor).filter(([, names]) => names.length > 1).forEach(([m, names]) => {
+        warnings.push({ type: 'warning', message: `Rules ${names.map(n => `"${n}"`).join(' and ')} both set motor "${m}". If both fire in the same loop, the later one wins.` });
+      });
+    })();
 
     // Clusters. A tag in two clusters makes the generated code aim at whichever
     // cluster's constant happens to be checked first — silently.
@@ -1194,7 +1477,7 @@ const FTCRobotConfigurator = () => {
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
-      macros, defaultTolerance
+      macros, rules, defaultTolerance
     };
     
     const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
@@ -1300,6 +1583,7 @@ const FTCRobotConfigurator = () => {
     setDriveRampMs(numOr(config.driveRampMs, 150));
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
+    setRules(Array.isArray(config.rules) ? config.rules : []);
     setServoControls(config.servoControls || {});
     setTelemetryHeading(config.telemetryHeading !== undefined ? config.telemetryHeading : true);
     setTelemetryAprilTag(config.telemetryAprilTag || false);
@@ -1354,7 +1638,7 @@ const FTCRobotConfigurator = () => {
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
-      macros, defaultTolerance
+      macros, rules, defaultTolerance
     };
     
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
@@ -1494,6 +1778,7 @@ const FTCRobotConfigurator = () => {
       estSeconds: Math.round(estSeconds * 100) / 100
     };
   };
+
 
   // ------------------------------------------------------------------
   // Robot profile export — the contract PathPilot consumes.
@@ -1689,7 +1974,39 @@ const FTCRobotConfigurator = () => {
         runMode: hasEncoder(mm) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'
       })),
       servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
+      // Sensors, so PathPilot can declare and init the ones rules read.
+      sensors: (sensors || []).map(sn => {
+        const info = sensorDatabase[sn.type] || {};
+        return { hardwareName: sn.name, hub: sn.hub || 'control', port: sn.port,
+          kind: info.type || sn.type, javaType: info.javaType || 'DigitalChannel', importPath: info.importPath || null };
+      }),
       macros: exposedMacros,
+      // Rules. `java.condition` is a boolean expression over the hardware
+      // fields above; `java.action` the statements to run when it holds.
+      // PathPilot can use a rule's condition as a waypoint "until", or run a
+      // rule flagged runInAuto inside its own loop. `javaHelpers` holds the
+      // one method the colour conditions call.
+      rules: activeRules().map(r => ({
+        name: r.name, mode: r.mode === 'latch' ? 'latch' : 'while', runInAuto: !!r.runInAuto,
+        conditions: (r.conditions || []).map(c => ({ ...c })),
+        action: { ...(r.action || {}) },
+        elseAction: ruleHasElse(r) ? { ...r.elseAction } : null,
+        java: {
+          condition: (r.conditions || []).map(ruleConditionJava).filter(Boolean).join(' && '),
+          action: ruleActionJava(r.action, []) || [],
+          elseAction: ruleHasElse(r) ? (ruleActionJava(r.elseAction, []) || []) : [],
+          sensors: (r.conditions || []).filter(c => c.sensor).map(c => c.sensor),
+          motors: [...new Set([...(r.conditions || []).filter(c => c.motor).map(c => c.motor), ...(r.action && r.action.motor ? [r.action.motor] : [])])],
+          servos: r.action && r.action.servo ? [r.action.servo] : [],
+          usesBlinkin: !!(r.action && r.action.type === 'led')
+        }
+      })),
+      // Java PathPilot can paste verbatim. seeTarget/targetVisible need the
+      // Limelight field plus the cluster constants in `clusterJava`.
+      javaHelpers: {
+        ...(rulesNeedColor() ? { seesColor: RULE_SEES_COLOR_JAVA } : {}),
+        ...(hasLimelight ? { seeTarget: [...SEE_TARGET_JAVA, '', ...TARGET_VISIBLE_JAVA], clusterJava: clusterConstantsJava() } : {})
+      },
       warnings: profileWarnings
     };
   };
@@ -2859,8 +3176,9 @@ ${(() => {
     const info = sensorDatabase[sn.type];
     if (info && info.importPath) need.add(info.importPath);
   });
-  if ((sensors || []).some(sn => (sensorDatabase[sn.type] || {}).type === 'distance')) {
+  if ((sensors || []).some(sn => (sensorDatabase[sn.type] || {}).type === 'distance') || rulesNeedDistance()) {
     need.add('org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit');
+    need.add('com.qualcomm.robotcore.hardware.DistanceSensor');
   }
   return Array.from(need).sort().map(p => `import ${p};`).join('\n');
 })()}
@@ -2902,16 +3220,7 @@ ${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values 
     private static final double TAG_ANGLE_TOLERANCE = 3.0;
     private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
 
-    // AprilTag clusters: several tags, one target. Any visible member locates
-    // the cell, and the step keeps driving on whichever one is in view instead
-    // of stalling because the one ID it wanted went behind a ball.
-${(clusters || []).map(c => `    private static final int[] ${CLUSTER_CONST(c)} = { ${(c.tagIds || []).map(Number).filter(n => !Number.isNaN(n)).join(', ')} };   // ${c.alliance === 'B' ? 'blue' : 'red'}, "${javaString(c.name)}"`).join('\n')}
-    // Where each tag sits relative to the cell opening, inches, in the camera's
-    // view (x lateral + right, z depth + further). Every cell uses the same
-    // sticker, so one set serves all clusters. Slot i pairs with ids[i].
-    private static final double[] CLUSTER_OFF_X_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.x) || 0).toFixed(2)).join(', ')} };
-    private static final double[] CLUSTER_OFF_Z_IN = { ${(clusterTagOffsets || []).map(o => (Number(o.z) || 0).toFixed(2)).join(', ')} };
-    private static final double[] NO_OFFSETS = { 0, 0, 0, 0 };
+${clusterConstantsJava().join('\n')}
 ` : ''}
 ${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.perpendicular.varName; })()) ? (() => {
   const p = podInfo();
@@ -2951,6 +3260,10 @@ ${driveLimitEnabled ? `
     private static final double DRIVE_RAMP_SEC = ${Number(driveRampMs) / 1000};
     private double forwardCmd = 0, strafeCmd = 0, rotateCmd = 0;
     private ElapsedTime rampTimer = new ElapsedTime();
+` : ''}${activeRules().length > 0 ? `
+    // Rule states (Rules tab). <name>On is whether the rule is acting this
+    // loop; a latched rule stays on after its condition clears until START.
+${activeRules().map((r, i) => `    private boolean rule${i + 1}On = false;   // ${r.name}${r.mode === 'latch' ? ' (latch)' : ''}${((r.action && r.action.type === 'start_macro') || (r.elseAction && r.elseAction.type === 'start_macro')) ? `\n    private boolean rule${i + 1}Prev = false;` : ''}`).join('\n')}
 ` : ''}
     // Timers
     private ElapsedTime loopTimer = new ElapsedTime();
@@ -3596,7 +3909,63 @@ ${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
 
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
-${macros.length > 0 ? `            } // End of driver-control block` : ''}
+${macros.length > 0 ? `            } // End of driver-control block` : ''}${activeRules().length > 0 ? (() => {
+  const velNames = velocityMotors.map(m => m.name);
+  const anyLed = activeRules().some(r => (r.action && r.action.type === 'led') || (r.elseAction && r.elseAction.type === 'led'));
+  const ind = '                ';
+  return `
+            // === RULES ===
+            //
+            // After the driver's controls, outside the driver-control block, and
+            // before the status LED. A rule runs last on whatever it touches, so
+            // its decision stands — that is what a rule is for. It also keeps
+            // running while a macro has the drivetrain: a sensor guard should
+            // not switch off because the robot is driving itself.
+            //
+            // "while" rules act only on loops where the condition holds; the
+            // ordinary controls take the motor back the moment it clears.
+            // "latch" rules stay on once triggered until START is pressed —
+            // the same button that cancels a macro, so one press always hands
+            // the robot back to the driver.
+${anyLed ? '            boolean ruleLed = false;   // a rule set the LED this loop; the status LED yields\n' : ''}${activeRules().map((r, i) => {
+    const n = i + 1;
+    const cond = (r.conditions || []).map(ruleConditionJava).filter(Boolean).join('\n' + ind + '    && ');
+    const act = (ruleActionJava(r.action, velNames) || []).map(l => ind + '    ' + l).join('\n');
+    const latch = r.mode === 'latch';
+    const elseAct = ruleHasElse(r) ? (ruleActionJava(r.elseAction, velNames) || []).map(l => ind + '    ' + l).join('\n') : null;
+    const ledFlag = (a) => a && a.type === 'led' ? `\n${ind}    ruleLed = true;` : '';
+    // A rule that starts a macro fires on the loop its condition becomes true,
+    // not on every loop it stays true — otherwise a hold-style macro that ends
+    // on release would restart the instant it finished.
+    //
+    // For those, the FIRST condition is the trigger (usually a button) and any
+    // further conditions are the decision: THEN runs when the trigger rises
+    // with the decision true, ELSE when it rises with the decision false. That
+    // is what "press A: if the tag is visible shoot, otherwise reposition"
+    // means, and a plain else-on-false would start the ELSE macro every loop
+    // the button sat idle.
+    const edge = (r.action && r.action.type === 'start_macro') || (r.elseAction && r.elseAction.type === 'start_macro');
+    const condList = (r.conditions || []).map(ruleConditionJava).filter(Boolean);
+    const trig = condList[0];
+    const decide = condList.length > 1 ? condList.slice(1).join('\n' + ind + '    && ') : 'true';
+    return `            // Rule ${n}: ${r.name}
+            {
+${edge ? `                boolean trigger = ${trig};
+                boolean decision = ${decide};
+                boolean rule${n}Rose = trigger && !rule${n}Prev;
+                rule${n}Prev = trigger;
+                boolean holds = trigger && decision;` : `                boolean holds = ${cond};`}
+${latch ? `                if (gamepad1.start || gamepad2.start) rule${n}On = false;
+                if (holds) rule${n}On = true;` : `                rule${n}On = holds;`}
+                if (${r.action.type === 'start_macro' ? `rule${n}Rose && decision` : `rule${n}On`}) {
+${act}${ledFlag(r.action)}
+                }${elseAct !== null ? `
+                ${r.elseAction.type === 'start_macro' ? `if (rule${n}Rose && !decision) {   // ELSE: trigger fired, decision false` : `if (!rule${n}On) {   // ELSE`}
+${elseAct}${ledFlag(r.elseAction)}
+                }` : ''}
+            }`;
+  }).join('\n')}`;
+})() : ''}
 ${velocityMotors.length > 0 ? `
             // === AT-SPEED TRACKING ===
             //
@@ -3634,7 +4003,13 @@ ${ledStatusActive ? `
             // activeMacro only exists when macros do, so with none configured
             // this is an unguarded block rather than a reference to a field
             // that was never declared.
-            ${macros.length > 0 ? 'if (activeMacro == -1) {' : '{'}
+            ${(() => {
+              const ledRule = activeRules().some(r => (r.action && r.action.type === 'led') || (r.elseAction && r.elseAction.type === 'led'));
+              const parts = [];
+              if (ledRule) parts.push('!ruleLed');
+              if (macros.length > 0) parts.push('activeMacro == -1');
+              return parts.length ? `if (${parts.join(' && ')}) {` : '{';
+            })()}
                 boolean shooterCommanded = ${velocityMotors.map(m => `${javaVarName(m.name)}Target != 0`).join(' || ')};
                 // A motor that was not asked to spin cannot hold anything back.
                 boolean shooterReady = ${velocityMotors.map(m => `(${javaVarName(m.name)}Target == 0 || ${javaVarName(m.name)}AtSpeed)`).join('\n                    && ')};
@@ -3653,7 +4028,8 @@ ${macros.length > 0 ? `            if (activeMacro != -1) {
             }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
 ${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}
-${telemetryAprilTag ? (hasLimelight ? `            {
+${activeRules().length > 0 ? `            telemetry.addData("Rules", "${activeRules().map(r => `${javaString(r.name)}:%s`).join(' ')}", ${activeRules().map((r, i) => `rule${i + 1}On ? "ON" : "-"`).join(', ')});
+` : ''}${telemetryAprilTag ? (hasLimelight ? `            {
                 // One line: which target is visible, how far, and how far off centre.
                 int[] wanted = { ${(targetTags || []).length ? targetTags.map(t => t.tagId).join(', ') : '20, 24'} };
                 String tagLine = "none visible";
@@ -3761,45 +4137,8 @@ ${hasLimelight ? `
         return p == null ? Double.NaN : Math.toDegrees(Math.atan2(p.x, p.z));
     }
 
-    /**
-     * Centre of a multi-tag target in camera space, inches, or null if no
-     * member is visible. x lateral (+ right), z depth.
-     *
-     * Each visible member is shifted by its own slot's offset so it reports the
-     * target's centre rather than its own, then the shifted positions are
-     * averaged. With all four in view the offsets cancel and this is just the
-     * sticker centre; with one in view it is that tag corrected toward the
-     * centre; either way the step gets the same point to drive at.
-     *
-     * requireUpright drops members whose roll is past 90 degrees. Hive cells
-     * pivot, and a flipped cell is not one you can score in — but a wall tag
-     * has no such state, so single-tag targets pass false.
-     */
-    private double[] seeTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright) {
-        if (limelight == null) return null;
-        LLResult result = limelight.getLatestResult();
-        if (result == null || !result.isValid()) return null;
-        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();
-        if (detections == null) return null;
-        double sx = 0, sz = 0;
-        int n = 0;
-        for (LLResultTypes.FiducialResult d : detections) {
-            int slot = -1;
-            for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }
-            if (slot < 0) continue;
-            Pose3D pose = d.getTargetPoseCameraSpace();
-            if (pose == null) continue;
-            if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;
-            double ox = slot < offXIn.length ? offXIn[slot] : 0;
-            double oz = slot < offZIn.length ? offZIn[slot] : 0;
-            sx += pose.getPosition().x * 39.3701 + ox;
-            sz += pose.getPosition().z * 39.3701 + oz;
-            n++;
-        }
-        if (n == 0) return null;
-        return new double[] { sx / n, sz / n };
-    }
-
+${SEE_TARGET_JAVA.join('\n')}
+${rulesNeedTag() ? '\n' + TARGET_VISIBLE_JAVA.join('\n') + '\n' : ''}
     /**
      * One iteration of driving toward a target — a single tag or a cluster.
      * Returns true once it is within tolerance. Non-blocking on purpose — a
@@ -3840,7 +4179,7 @@ ${hasLimelight ? `
         return v < lo ? lo : (v > hi ? hi : v);
     }
 ` : ''}
-${(() => {
+${rulesNeedColor() ? RULE_SEES_COLOR_JAVA.join('\n') + '\n\n' : ''}${(() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
     return `    /** Robot-oriented mixing, shared by the tag helpers. */
@@ -7025,6 +7364,252 @@ Make sure your code initializes the IMU with these orientations!
           </div>
         );
 
+      case 'rules': {
+        const RULE_BUTTONS = [
+          ['a', 'A'], ['b', 'B'], ['x', 'X'], ['y', 'Y'],
+          ['left_bumper', 'Left Bumper'], ['right_bumper', 'Right Bumper'],
+          ['left_trigger', 'Left Trigger'], ['right_trigger', 'Right Trigger'],
+          ['dpad_up', 'D-pad Up'], ['dpad_down', 'D-pad Down'], ['dpad_left', 'D-pad Left'], ['dpad_right', 'D-pad Right'],
+          ['left_stick_button', 'Left Stick Click'], ['right_stick_button', 'Right Stick Click'], ['back', 'Back / Share']
+        ];
+        const sel = 'bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm';
+        const inp = 'bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm w-20';
+        const colorSensors = sensors.filter(s => (sensorDatabase[s.type] || {}).type === 'color');
+        const rangeSensors = sensors.filter(s => ['color', 'distance'].includes((sensorDatabase[s.type] || {}).type));
+        const touchSensors = sensors.filter(s => ['touch', 'limit'].includes((sensorDatabase[s.type] || {}).type));
+        const encoderMotors = auxMotors.filter(m => hasEncoder(m));
+        const updateRule = (id, patch) => setRules(rules.map(r => r.id === id ? { ...r, ...patch } : r));
+        const updateCond = (rule, idx, patch) => updateRule(rule.id, { conditions: rule.conditions.map((c, i) => i === idx ? { ...c, ...patch } : c) });
+        const newCond = (type) => {
+          switch (type) {
+            case 'color': return { type, sensor: colorSensors[0]?.name || '', color: 'red', ratio: 1.4, min: 300 };
+            case 'distance': return { type, sensor: rangeSensors[0]?.name || '', op: '<', inches: 2 };
+            case 'velocity': return { type, motor: encoderMotors[0]?.name || '', op: 'above', value: 1000 };
+            case 'button': return { type, controller: 'gamepad1', button: 'a' };
+            case 'touch': return { type, sensor: touchSensors[0]?.name || '' };
+            case 'tag': return { type, target: clusters[0] ? `cluster:${clusters[0].id}` : 'tag:20', negate: false };
+            default: return { type };
+          }
+        };
+        const teleopMacros = macros.map((m, i) => ({ m, i })).filter(x => teleopMacroIndex(x.i));
+        const newAction = (type) => {
+          switch (type) {
+            case 'motor_power': return { type, motor: auxMotors[0]?.name || '', power: 0.5 };
+            case 'motor_velocity': return { type, motor: encoderMotors[0]?.name || '', velocity: 1000 };
+            case 'motor_stop': return { type, motor: auxMotors[0]?.name || '' };
+            case 'servo_position': return { type, servo: servos[0]?.name || '', position: 0.5 };
+            case 'led': return { type, pattern: blinkinPatterns[0]?.name || '' };
+            case 'start_macro': return { type, macroId: teleopMacros[0] ? teleopMacros[0].m.id : '' };
+            default: return { type };
+          }
+        };
+        const addRule = () => {
+          const id = rules.length > 0 ? Math.max(...rules.map(r => r.id)) + 1 : 1;
+          setRules([...rules, { id, name: `Rule ${id}`, enabled: true, mode: 'while', runInAuto: false,
+            conditions: [newCond(colorSensors.length ? 'color' : 'button')], action: newAction('motor_power') }]);
+        };
+        const condEditor = (rule, c, idx) => (
+          <div key={idx} className="flex flex-wrap items-center gap-2 bg-gray-800 rounded p-2">
+            <span className="text-xs text-gray-400 w-10">{idx === 0 ? 'WHEN' : 'AND'}</span>
+            <select className={sel} value={c.type} onChange={(e) => updateCond(rule, idx, newCond(e.target.value))}>
+              <option value="color">colour sensor sees</option>
+              <option value="distance">distance is</option>
+              <option value="velocity">motor velocity is</option>
+              <option value="button">button held</option>
+              <option value="touch">touch / limit pressed</option>
+              <option value="tag">AprilTag visible</option>
+            </select>
+            {c.type === 'tag' && (<>
+              <select className={sel} value={c.negate ? 'no' : 'yes'} onChange={(e) => updateCond(rule, idx, { negate: e.target.value === 'no' })}>
+                <option value="yes">is visible</option><option value="no">is NOT visible</option>
+              </select>
+              <select className={sel} value={c.target || ''} onChange={(e) => updateCond(rule, idx, { target: e.target.value })}>
+                <optgroup label="Hive cell clusters">
+                  {clusters.map(cl => <option key={cl.id} value={`cluster:${cl.id}`}>{cl.name} ({(cl.tagIds || []).join(', ')})</option>)}
+                </optgroup>
+                <optgroup label="Single tags">
+                  {Array.from({ length: 50 }, (_, i) => i).map(i => <option key={i} value={`tag:${i}`}>tag {i}</option>)}
+                </optgroup>
+              </select>
+              {!hasLimelight && <span className="text-xs text-red-300">Limelight is off (Limelight tab)</span>}
+            </>)}
+            {c.type === 'color' && (<>
+              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {colorSensors.length === 0 && <option value="">(no colour sensor)</option>}
+                {colorSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              </select>
+              <select className={sel} value={c.color} onChange={(e) => updateCond(rule, idx, { color: e.target.value })}>
+                <option value="red">red</option><option value="blue">blue</option><option value="green">green</option>
+                <option value="any">anything (object present)</option><option value="none">nothing</option>
+              </select>
+              <span className="text-xs text-gray-400">ratio</span>
+              <input type="number" step="0.1" min="1" className={inp} value={c.ratio} onChange={(e) => updateCond(rule, idx, { ratio: parseFloat(e.target.value) })} />
+              <span className="text-xs text-gray-400">min R+G+B</span>
+              <input type="number" step="50" min="0" className={inp} value={c.min} onChange={(e) => updateCond(rule, idx, { min: parseFloat(e.target.value) })} />
+            </>)}
+            {c.type === 'distance' && (<>
+              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {rangeSensors.length === 0 && <option value="">(no distance-capable sensor)</option>}
+                {rangeSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              </select>
+              <select className={sel} value={c.op} onChange={(e) => updateCond(rule, idx, { op: e.target.value })}>
+                <option value="<">less than</option><option value=">">more than</option>
+              </select>
+              <input type="number" step="0.5" min="0" className={inp} value={c.inches} onChange={(e) => updateCond(rule, idx, { inches: parseFloat(e.target.value) })} />
+              <span className="text-xs text-gray-400">in</span>
+            </>)}
+            {c.type === 'velocity' && (<>
+              <select className={sel} value={c.motor} onChange={(e) => updateCond(rule, idx, { motor: e.target.value })}>
+                {encoderMotors.length === 0 && <option value="">(no motor with encoder)</option>}
+                {encoderMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+              </select>
+              <select className={sel} value={c.op} onChange={(e) => updateCond(rule, idx, { op: e.target.value })}>
+                <option value="above">above</option><option value="below">below</option>
+              </select>
+              <input type="number" step="50" min="0" className={inp} value={c.value} onChange={(e) => updateCond(rule, idx, { value: parseFloat(e.target.value) })} />
+              <span className="text-xs text-gray-400">ticks/s</span>
+            </>)}
+            {c.type === 'button' && (<>
+              <select className={sel} value={c.controller} onChange={(e) => updateCond(rule, idx, { controller: e.target.value })}>
+                <option value="gamepad1">Gamepad 1</option><option value="gamepad2">Gamepad 2</option>
+              </select>
+              <select className={sel} value={c.button} onChange={(e) => updateCond(rule, idx, { button: e.target.value })}>
+                {RULE_BUTTONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </>)}
+            {c.type === 'touch' && (
+              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {touchSensors.length === 0 && <option value="">(no touch/limit sensor)</option>}
+                {touchSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              </select>
+            )}
+            {rule.conditions.length > 1 && (
+              <button onClick={() => updateRule(rule.id, { conditions: rule.conditions.filter((_, i) => i !== idx) })}
+                className="ml-auto text-red-400 hover:text-red-300 text-xs">remove</button>
+            )}
+          </div>
+        );
+        const actionEditor = (rule, key = 'action') => {
+          const a = rule[key] || {};
+          const isElse = key === 'elseAction';
+          const upd = (patch) => updateRule(rule.id, { [key]: { ...a, ...patch } });
+          return (
+            <div className="flex flex-wrap items-center gap-2 bg-gray-800 rounded p-2">
+              <span className="text-xs text-gray-400 w-10">{isElse ? 'ELSE' : 'THEN'}</span>
+              <select className={sel} value={a.type || ''} onChange={(e) => updateRule(rule.id, { [key]: e.target.value ? newAction(e.target.value) : null })}>
+                {isElse && <option value="">(no ELSE)</option>}
+                <option value="motor_power">set motor power</option>
+                <option value="motor_velocity">set motor velocity</option>
+                <option value="motor_stop">stop motor</option>
+                <option value="servo_position">set servo position</option>
+                <option value="led">set LED pattern</option>
+                <option value="start_macro">start macro</option>
+              </select>
+              {a.type === 'start_macro' && (<>
+                <select className={sel} value={a.macroId ?? ''} onChange={(e) => upd({ macroId: e.target.value })}>
+                  {teleopMacros.length === 0 && <option value="">(no TeleOp macro with steps)</option>}
+                  {teleopMacros.map(x => <option key={x.m.id} value={x.m.id}>{x.m.name}</option>)}
+                </select>
+                <span className="text-xs text-gray-400">once per press of the first condition{isElse ? ', when the other conditions are false' : ''}; only if no macro is running</span>
+              </>)}
+              {(a.type === 'motor_power' || a.type === 'motor_stop') && (
+                <select className={sel} value={a.motor} onChange={(e) => upd({ motor: e.target.value })}>
+                  {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                </select>
+              )}
+              {a.type === 'motor_power' && (<>
+                <span className="text-xs text-gray-400">power</span>
+                <input type="number" step="0.1" min="-1" max="1" className={inp} value={a.power} onChange={(e) => upd({ power: parseFloat(e.target.value) })} />
+                <span className="text-xs text-gray-400">(negative = reverse)</span>
+              </>)}
+              {a.type === 'motor_velocity' && (<>
+                <select className={sel} value={a.motor} onChange={(e) => upd({ motor: e.target.value })}>
+                  {encoderMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                </select>
+                <input type="number" step="50" className={inp} value={a.velocity} onChange={(e) => upd({ velocity: parseFloat(e.target.value) })} />
+                <span className="text-xs text-gray-400">ticks/s</span>
+              </>)}
+              {a.type === 'servo_position' && (<>
+                <select className={sel} value={a.servo} onChange={(e) => upd({ servo: e.target.value })}>
+                  {servos.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                </select>
+                <input type="number" step="0.05" min="0" max="1" className={inp} value={a.position} onChange={(e) => upd({ position: parseFloat(e.target.value) })} />
+              </>)}
+              {a.type === 'led' && (
+                <select className={sel} value={a.pattern} onChange={(e) => upd({ pattern: e.target.value })}>
+                  {!hasBlinkin && <option value="">(no Blinkin configured)</option>}
+                  {blinkinPatterns.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                </select>
+              )}
+            </div>
+          );
+        };
+        return (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-bold text-green-400">Rules</h3>
+              <button onClick={addRule} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">+ Add Rule</button>
+            </div>
+            <div className="p-3 rounded border border-gray-600 bg-gray-800 text-xs text-gray-400 leading-relaxed">
+              <strong className="text-gray-200">WHEN</strong> a condition holds, <strong className="text-gray-200">THEN</strong> do something —
+              checked every loop, after the driver's controls, so the rule wins. <strong className="text-gray-200">While</strong> rules
+              act only while the condition is true; <strong className="text-gray-200">Latch</strong> rules stay on until START is pressed.
+              Sensors come from the Sensors tab. For colour thresholds, tick <em>Color sensors</em> in the Telemetry tab, run the
+              robot, and read the raw R/G/B with and without a ball: <em>ratio</em> is how much the wanted colour must beat the
+              other two (1.4 = 40% more); <em>min R+G+B</em> rejects an empty view. A While rule can also have an
+              <strong className="text-gray-200"> ELSE</strong> action for when the condition is false. <em>Start macro</em> fires
+              once, when no macro is already running: the <em>first</em> condition is the trigger (a button, say) and any
+              further condition is the decision — THEN when the trigger is pressed and the decision is true, ELSE when it
+              is pressed and the decision is false. Rules also go into the
+              PathPilot profile, with the Java for each condition.
+            </div>
+            {rules.length === 0 ? (
+              <p className="text-gray-400 text-sm">No rules yet. Example: WHEN colour sensor sees red THEN set intake power −0.6.</p>
+            ) : rules.map((rule, ri) => {
+              const problem = ruleProblem(rule);
+              return (
+                <div key={rule.id} className={`bg-gray-700 p-4 rounded-lg space-y-2 ${rule.enabled === false ? 'opacity-60' : ''}`}>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-1 text-sm text-white">
+                      <input type="checkbox" checked={rule.enabled !== false} onChange={(e) => updateRule(rule.id, { enabled: e.target.checked })} />
+                      on
+                    </label>
+                    <input type="text" value={rule.name} onChange={(e) => updateRule(rule.id, { name: e.target.value })}
+                      className="bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm flex-1 min-w-[10rem]" placeholder="Rule name" />
+                    <select className={sel} value={rule.mode || 'while'} onChange={(e) => updateRule(rule.id, { mode: e.target.value })}>
+                      <option value="while">While condition holds</option>
+                      <option value="latch">Latch until START</option>
+                    </select>
+                    <label className="flex items-center gap-1 text-xs text-gray-300" title="Exported to PathPilot as a rule to run inside autonomous">
+                      <input type="checkbox" checked={!!rule.runInAuto} onChange={(e) => updateRule(rule.id, { runInAuto: e.target.checked })} />
+                      also in auto
+                    </label>
+                    <button onClick={() => setRules(rules.filter(r => r.id !== rule.id))} className="text-red-400 hover:text-red-300 text-sm ml-auto">Delete</button>
+                  </div>
+                  {rule.conditions.map((c, idx) => condEditor(rule, c, idx))}
+                  {rule.conditions.length < 2 && (
+                    <button onClick={() => updateRule(rule.id, { conditions: [...rule.conditions, newCond('button')] })}
+                      className="text-xs text-blue-300 hover:text-blue-200">+ AND another condition</button>
+                  )}
+                  {actionEditor(rule)}
+                  {(rule.mode || 'while') === 'while' && actionEditor(rule, 'elseAction')}
+                  {problem && rule.enabled !== false && (
+                    <div className="text-xs text-red-300">Not generated: this rule {problem}.</div>
+                  )}
+                  {!problem && (
+                    <div className="text-xs text-gray-500 font-mono">
+                      if ({rule.conditions.map(ruleConditionJava).filter(Boolean).join(' && ')}) {'{ '}
+                      {(ruleActionJava(rule.action, []) || []).join(' ')}{' }'}
+                      {ruleHasElse(rule) && <> else {'{ '}{(ruleActionJava(rule.elseAction, []) || []).join(' ')}{' }'}</>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      }
+
       case 'telemetry':
         return (
           <div className="space-y-6">
@@ -8282,6 +8867,7 @@ Make sure your code initializes the IMU with these orientations!
               { id: 'ports', label: 'Ports' },
               { id: 'controls', label: 'Controls' },
               { id: 'macros', label: 'Macros' },
+              { id: 'rules', label: 'Rules' },
               { id: 'telemetry', label: 'Telemetry' },
               { id: 'output', label: 'Code' },
               { id: 'driverstation', label: 'DS' }
