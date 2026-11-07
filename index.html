@@ -271,6 +271,9 @@ const FTCRobotConfigurator = () => {
   // loop after the driver's controls, so a rule's decision stands — that is
   // what the rule is for. Empty by default: no rules, no generated code.
   const [rules, setRules] = React.useState([]);
+  // Colour-sensor gain, shared by the Sensor Test and any TeleOp that has
+  // colour rules, so thresholds read off one apply to the other.
+  const [colorSensorGain, setColorSensorGain] = React.useState(8);
   const [editingMacroId, setEditingMacroId] = React.useState(null);
   const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
 
@@ -908,17 +911,66 @@ const FTCRobotConfigurator = () => {
   // A rule is { name, enabled, mode: 'while' | 'latch', runInAuto,
   //             conditions: [cond, cond?], action }.
   // Conditions are ANDed. Kinds:
-  //   color    { sensor, color: red|blue|green|any|none, ratio, min }
+  //   color    { sensor, color: red|blue|green|custom|any|none,
+  //              mode: hue|ratio|rgb,
+  //              hue, hueTol, minSat, minVal        (hue mode)
+  //              ratio, min                          (ratio mode)
+  //              rMin, rMax, gMin, gMax, bMin, bMax  (rgb mode) }
   //   distance { sensor, op: '<' | '>', inches }
   //   velocity { motor, op: above|below, value }
   //   button   { controller, button }
   //   touch    { sensor }
-  // Actions:
+  //   tag      { target: 'cluster:<id>' | 'tag:<n>', negate }
+  // Actions (a rule holds a list: actions[], elseActions[]; the older single
+  // action / elseAction fields are still read):
   //   motor_power { motor, power }   motor_velocity { motor, velocity }
   //   motor_stop  { motor }          servo_position { servo, position }
-  //   led         { pattern }
+  //   led         { pattern }        start_macro    { macroId }
   // ------------------------------------------------------------------
   const RULE_COLOR_CHAR = { red: 'R', green: 'G', blue: 'B', any: 'A', none: 'A' };
+  // Textbook hue centres, degrees. Game pieces rarely land exactly here —
+  // read the real value off the Sensor Test and use "custom".
+  const RULE_HUE_PRESET = { red: 0, green: 120, blue: 225 };
+
+  // Hue-based detection: the three channels are folded into one angle that
+  // barely moves with distance or brightness, so a single tolerance survives
+  // the move from the practice field to the venue. Uses the SDK's normalized
+  // read plus Android's RGB→HSV, the same way the FTC SensorColor sample does.
+  const RULE_SEES_HUE_JAVA = [
+    '    /** Hue (0-360), saturation (0-1) and value (0-1) of what a colour sensor sees. */',
+    '    private static float[] readHsv(ColorSensor s) {',
+    '        float[] hsv = new float[3];',
+    '        NormalizedRGBA c = ((NormalizedColorSensor) s).getNormalizedColors();',
+    '        Color.colorToHSV(c.toColor(), hsv);',
+    '        return hsv;',
+    '    }',
+    '',
+    '    /**',
+    '     * Hue test with wrap-around (red sits at 0 = 360). minSat rejects grey and',
+    '     * white, which have no hue to speak of; minVal rejects an empty view. Set',
+    '     * either to 0 to skip it.',
+    '     */',
+    '    private static boolean seesHue(ColorSensor s, double hue, double tol, double minSat, double minVal) {',
+    '        float[] hsv = readHsv(s);',
+    '        if (hsv[1] < minSat || hsv[2] < minVal) return false;',
+    '        double d = Math.abs(((hsv[0] - hue) % 360 + 540) % 360 - 180);',
+    '        return d <= tol;',
+    '    }',
+    '',
+    '    /** Something in view at all: brightness over the floor, whatever the colour. */',
+    '    private static boolean seesSomething(ColorSensor s, double minVal) {',
+    '        return readHsv(s)[2] >= minVal;',
+    '    }'
+  ];
+  // Raw-channel ranges: each of R, G, B must sit inside its own band. The
+  // easiest to understand, the most sensitive to distance and lighting.
+  const RULE_SEES_RGB_JAVA = [
+    '    /** Raw R/G/B range test: every channel inside its band. */',
+    '    private static boolean seesRgb(ColorSensor s, int rMin, int rMax, int gMin, int gMax, int bMin, int bMax) {',
+    '        int r = s.red(), g = s.green(), b = s.blue();',
+    '        return r >= rMin && r <= rMax && g >= gMin && g <= gMax && b >= bMin && b <= bMax;',
+    '    }'
+  ];
 
   // The one helper rules need in the generated class. Dominant-channel test:
   // the wanted channel must beat each of the others by `ratio`, and the total
@@ -953,9 +1005,22 @@ const FTCRobotConfigurator = () => {
       case 'color': {
         if (!ruleSensor(c.sensor)) return null;
         const v = javaVarName(c.sensor);
-        const ch = RULE_COLOR_CHAR[c.color] || 'A';
-        const expr = `seesColor(${v}, '${ch}', ${num(c.ratio, 1.4)}, ${Math.round(num(c.min, 300))})`;
-        return c.color === 'none' ? `!${expr}` : expr;
+        const mode = c.mode || 'hue';
+        if (c.color === 'any' || c.color === 'none') {
+          // Presence only. Hue mode reads brightness; ratio mode the raw total.
+          const expr = mode === 'hue'
+            ? `seesSomething(${v}, ${num(c.minVal, 0.1)})`
+            : `seesColor(${v}, 'A', 1, ${Math.round(num(c.min, 300))})`;
+          return c.color === 'none' ? `!${expr}` : expr;
+        }
+        if (mode === 'rgb') {
+          return `seesRgb(${v}, ${[c.rMin, c.rMax, c.gMin, c.gMax, c.bMin, c.bMax].map((x, i) => Math.round(num(x, i % 2 ? 65535 : 0))).join(', ')})`;
+        }
+        if (mode === 'ratio') {
+          return `seesColor(${v}, '${RULE_COLOR_CHAR[c.color] || 'R'}', ${num(c.ratio, 1.4)}, ${Math.round(num(c.min, 300))})`;
+        }
+        const hue = c.color === 'custom' ? num(c.hue, 0) : (RULE_HUE_PRESET[c.color] ?? num(c.hue, 0));
+        return `seesHue(${v}, ${hue}, ${num(c.hueTol, 25)}, ${num(c.minSat, 0.3)}, ${num(c.minVal, 0)})`;
       }
       case 'distance': {
         if (!ruleSensor(c.sensor)) return null;
@@ -1079,21 +1144,29 @@ const FTCRobotConfigurator = () => {
       if (ruleActionJava(a, []) === null) return `has an incomplete ${label}`;
       return null;
     };
-    const ap = actionProblem(r.action, 'action');
-    if (ap) return ap;
-    if (r.elseAction && r.elseAction.type) {
-      const ep = actionProblem(r.elseAction, 'ELSE action');
-      if (ep) return ep;
+    const acts = ruleActions(r), elses = ruleElseActions(r);
+    if (acts.length === 0) return 'has no action';
+    for (const a of acts) { const ap = actionProblem(a, 'action'); if (ap) return ap; }
+    if (elses.length) {
+      for (const e of elses) { const ep = actionProblem(e, 'ELSE action'); if (ep) return ep; }
       if (r.mode === 'latch') return 'has an ELSE action, which only makes sense for a While rule (a latched rule never returns to ELSE until START)';
-      if (r.elseAction.type === 'start_macro' && conds.length < 2) return 'has an ELSE that starts a macro but only one condition — add a second condition to decide between THEN and ELSE (the first is the trigger)';
+      if (elses.some(e => e.type === 'start_macro') && conds.length < 2) return 'has an ELSE that starts a macro but only one condition — add a second condition to decide between THEN and ELSE (the first is the trigger)';
     }
     return null;
   };
 
+  // Action lists, reading the older single-action fields too.
+  const ruleActions = (r) => Array.isArray(r.actions) ? r.actions.filter(Boolean) : (r.action && r.action.type ? [r.action] : []);
+  const ruleElseActions = (r) => Array.isArray(r.elseActions) ? r.elseActions.filter(Boolean) : (r.elseAction && r.elseAction.type ? [r.elseAction] : []);
+
   const activeRules = () => (rules || []).filter(r => r.enabled !== false && !ruleProblem(r));
   const rulesNeedDistance = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'distance'));
-  const rulesNeedColor = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'color'));
-  const ruleHasElse = (r) => !!(r.elseAction && r.elseAction.type);
+  const ruleColorMode = (c) => (c.color === 'any' || c.color === 'none') ? ((c.mode || 'hue') === 'hue' ? 'hue' : 'ratio') : (c.mode || 'hue');
+  const rulesNeedColorMode = (mode) => activeRules().some(r => (r.conditions || []).some(c => c.type === 'color' && ruleColorMode(c) === mode));
+  const rulesNeedColor = () => rulesNeedColorMode('ratio');
+  const rulesNeedHue = () => rulesNeedColorMode('hue');
+  const rulesNeedRgb = () => rulesNeedColorMode('rgb');
+  const ruleHasElse = (r) => ruleElseActions(r).length > 0;
   const rulesNeedTag = () => activeRules().some(r => (r.conditions || []).some(c => c.type === 'tag'));
 
   const getValidationWarnings = () => {
@@ -1477,7 +1550,7 @@ const FTCRobotConfigurator = () => {
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
-      macros, rules, defaultTolerance
+      macros, rules, colorSensorGain, defaultTolerance
     };
     
     const existingIndex = savedConfigs.findIndex(c => c.name === robotName);
@@ -1584,6 +1657,7 @@ const FTCRobotConfigurator = () => {
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setRules(Array.isArray(config.rules) ? config.rules : []);
+    setColorSensorGain(numOr(config.colorSensorGain, 8));
     setServoControls(config.servoControls || {});
     setTelemetryHeading(config.telemetryHeading !== undefined ? config.telemetryHeading : true);
     setTelemetryAprilTag(config.telemetryAprilTag || false);
@@ -1638,7 +1712,7 @@ const FTCRobotConfigurator = () => {
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
-      macros, rules, defaultTolerance
+      macros, rules, colorSensorGain, defaultTolerance
     };
     
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
@@ -1989,22 +2063,24 @@ const FTCRobotConfigurator = () => {
       rules: activeRules().map(r => ({
         name: r.name, mode: r.mode === 'latch' ? 'latch' : 'while', runInAuto: !!r.runInAuto,
         conditions: (r.conditions || []).map(c => ({ ...c })),
-        action: { ...(r.action || {}) },
-        elseAction: ruleHasElse(r) ? { ...r.elseAction } : null,
+        actions: ruleActions(r).map(a => ({ ...a })),
+        elseActions: ruleElseActions(r).map(a => ({ ...a })),
         java: {
           condition: (r.conditions || []).map(ruleConditionJava).filter(Boolean).join(' && '),
-          action: ruleActionJava(r.action, []) || [],
-          elseAction: ruleHasElse(r) ? (ruleActionJava(r.elseAction, []) || []) : [],
+          action: ruleActions(r).flatMap(a => ruleActionJava(a, []) || []),
+          elseAction: ruleElseActions(r).flatMap(a => ruleActionJava(a, []) || []),
           sensors: (r.conditions || []).filter(c => c.sensor).map(c => c.sensor),
-          motors: [...new Set([...(r.conditions || []).filter(c => c.motor).map(c => c.motor), ...(r.action && r.action.motor ? [r.action.motor] : [])])],
-          servos: r.action && r.action.servo ? [r.action.servo] : [],
-          usesBlinkin: !!(r.action && r.action.type === 'led')
+          motors: [...new Set([...(r.conditions || []).filter(c => c.motor).map(c => c.motor), ...[...ruleActions(r), ...ruleElseActions(r)].filter(a => a.motor).map(a => a.motor)])],
+          servos: [...new Set([...ruleActions(r), ...ruleElseActions(r)].filter(a => a.servo).map(a => a.servo))],
+          usesBlinkin: [...ruleActions(r), ...ruleElseActions(r)].some(a => a.type === 'led')
         }
       })),
       // Java PathPilot can paste verbatim. seeTarget/targetVisible need the
       // Limelight field plus the cluster constants in `clusterJava`.
       javaHelpers: {
         ...(rulesNeedColor() ? { seesColor: RULE_SEES_COLOR_JAVA } : {}),
+        ...(rulesNeedHue() ? { seesHue: RULE_SEES_HUE_JAVA } : {}),
+        ...(rulesNeedRgb() ? { seesRgb: RULE_SEES_RGB_JAVA } : {}),
         ...(hasLimelight ? { seeTarget: [...SEE_TARGET_JAVA, '', ...TARGET_VISIBLE_JAVA], clusterJava: clusterConstantsJava() } : {})
       },
       warnings: profileWarnings
@@ -2287,6 +2363,226 @@ const FTCRobotConfigurator = () => {
       '    }',
       '}');
 
+    return L.join('\n');
+  };
+
+  // ------------------------------------------------------------------
+  // SensorTest.java — read every configured sensor live, capture samples,
+  // and see what the Rules would decide. This is where colour thresholds
+  // come from: hold a ball in front of the sensor, press A, read the hue.
+  // ------------------------------------------------------------------
+  const generateSensorTest = () => {
+    const list = (sensors || []).map(sn => {
+      const info = sensorDatabase[sn.type] || {};
+      return { ...sn, kind: info.type || 'other', javaType: info.javaType || 'DigitalChannel', importPath: info.importPath, var: javaVarName(sn.name), label: info.name || sn.type };
+    });
+    if (!list.length) {
+      return '// No sensors configured yet. Add one in the Sensors tab (a REV Color\n'
+           + '// Sensor V3, say) and this OpMode will appear here.';
+    }
+    const className = javaClassName(robotName, 'SensorTest');
+    const colour = list.filter(x => x.kind === 'color');
+    const dist = list.filter(x => x.kind === 'distance');
+    const touch = list.filter(x => x.kind === 'touch' || x.kind === 'limit');
+    const other = list.filter(x => !['color', 'distance', 'touch', 'limit'].includes(x.kind));
+    const gain = Number(colorSensorGain) || 8;
+
+    // Rules that read a sensor, so the test can show the rule's live verdict.
+    // Only the sensor-reading conditions are evaluated — a rule's button or
+    // motor conditions have no meaning on a test bench.
+    const SENSOR_COND = ['color', 'distance', 'touch'];
+    const sensorConds = (r) => (r.conditions || []).filter(c => SENSOR_COND.includes(c.type) && c.sensor);
+    const sensorRules = activeRules().map((r, i) => ({ r, i })).filter(x => sensorConds(x.r).length > 0);
+    const condModes = new Set(sensorRules.flatMap(x => sensorConds(x.r)).filter(c => c.type === 'color').map(ruleColorMode));
+
+    const imports = new Set([
+      'com.qualcomm.robotcore.eventloop.opmode.LinearOpMode',
+      'com.qualcomm.robotcore.eventloop.opmode.TeleOp',
+      'com.qualcomm.robotcore.util.ElapsedTime',
+      'java.util.ArrayDeque',
+      'java.util.Locale'
+    ]);
+    list.forEach(x => { if (x.importPath) imports.add(x.importPath); });
+    if (colour.length) {
+      imports.add('com.qualcomm.robotcore.hardware.NormalizedColorSensor');
+      imports.add('com.qualcomm.robotcore.hardware.NormalizedRGBA');
+      imports.add('com.qualcomm.robotcore.hardware.DistanceSensor');
+      imports.add('android.graphics.Color');
+    }
+    if (colour.length || dist.length) imports.add('org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit');
+    if (sensorRules.length && sensorRules.some(x => x.r.conditions.some(c => c.type === 'velocity'))) imports.add('com.qualcomm.robotcore.hardware.DcMotorEx');
+
+    const L = [];
+    const P = (...xs) => xs.forEach(x => L.push(x));
+    P('package org.firstinspires.ftc.teamcode;', '');
+    Array.from(imports).sort().forEach(i => P(`import ${i};`));
+    P('',
+      '/**',
+      ` * ${className} — generated by BotBuilder from the "${javaString(robotName)}" configuration.`,
+      ' *',
+      ' * Reads every configured sensor, every loop, and shows the numbers the',
+      ' * Rules tab asks for: raw R/G/B, hue / saturation / value, distance,',
+      ' * pressed / open. Hold a game piece where the sensor will see it in a',
+      ' * match, press A to capture a sample, and type what you read into the',
+      ' * matching rule. Three samples stay on screen so two colours can be',
+      ' * compared side by side.',
+      ' *',
+      ` * Colour sensors run at gain ${gain}, the same value BotBuilder puts in the`,
+      ' * TeleOp when colour rules exist, so a threshold read here means the same',
+      ' * thing there. Change the gain in both places or in neither.',
+      ' *',
+      ' * CONTROLS',
+      ' *   D-pad up / down   choose a sensor (the chosen one gets the full readout)',
+      ' *   A                 capture a sample of the chosen sensor',
+      ' *   B                 reset min / max and the press counter',
+      ' *   X                 cycle colour gain 1 / 2 / 4 / 8 / 16 / 32 (shown on screen)',
+      ' */',
+      `@TeleOp(name = "${javaString(className)}", group = "BotBuilder")`,
+      `public class ${className} extends LinearOpMode {`,
+      '');
+    list.forEach(x => P(`    private ${x.javaType} ${x.var};   // ${x.label}, ${x.hub || 'control'} hub ${x.javaType === 'DigitalChannel' || x.kind === 'touch' || x.kind === 'limit' ? 'digital' : 'I2C'} port ${x.port}`));
+    P('',
+      `    private static final String[] NAMES = { ${list.map(x => `"${javaString(x.name)}"`).join(', ')} };`,
+      `    private static final String[] KINDS = { ${list.map(x => `"${x.kind}"`).join(', ')} };`,
+      '    private static final float[] GAINS = { 1, 2, 4, 8, 16, 32 };',
+      '',
+      '    private int selected = 0;',
+      `    private float gain = ${gain}f;`,
+      '    private final ArrayDeque<String> samples = new ArrayDeque<>();',
+      '    private double[] minSeen = new double[NAMES.length];',
+      '    private double[] maxSeen = new double[NAMES.length];',
+      '    private int[] presses = new int[NAMES.length];',
+      '    private boolean[] wasPressed = new boolean[NAMES.length];',
+      '    private boolean prevUp, prevDown, prevA, prevB, prevX;',
+      '    private final ElapsedTime loopTimer = new ElapsedTime();',
+      '',
+      '    @Override',
+      '    public void runOpMode() {');
+    list.forEach(x => {
+      P(`        ${x.var} = hardwareMap.get(${x.javaType}.class, "${javaString(x.name)}");`);
+      if (x.javaType === 'DigitalChannel') P(`        ${x.var}.setMode(DigitalChannel.Mode.INPUT);`);
+    });
+    if (colour.length) P('        applyGain();');
+    P('        resetStats();',
+      '',
+      `        telemetry.addLine("${javaString(className)} ready — " + NAMES.length + " sensor(s)");`,
+      '        telemetry.addLine("D-pad up/down pick  ·  A capture  ·  B reset  ·  X gain");',
+      '        telemetry.update();',
+      '        waitForStart();',
+      '',
+      '        while (opModeIsActive()) {',
+      '            boolean up = gamepad1.dpad_up, down = gamepad1.dpad_down;',
+      '            boolean a = gamepad1.a, b = gamepad1.b, x = gamepad1.x;',
+      '            if (up && !prevUp)     selected = (selected + NAMES.length - 1) % NAMES.length;',
+      '            if (down && !prevDown) selected = (selected + 1) % NAMES.length;',
+      '            if (b && !prevB) resetStats();');
+    if (colour.length) {
+      P('            if (x && !prevX) {',
+        '                int gi = 0;',
+        '                for (int i = 0; i < GAINS.length; i++) if (GAINS[i] == gain) gi = i;',
+        '                gain = GAINS[(gi + 1) % GAINS.length];',
+        '                applyGain();',
+        '            }');
+    }
+    P('            prevUp = up; prevDown = down; prevB = b; prevX = x;',
+      '',
+      '            telemetry.addData("Sensor", "%d/%d  %s  (%s)", selected + 1, NAMES.length, NAMES[selected], KINDS[selected]);');
+    if (colour.length) P(`            telemetry.addData("Gain", "%.0f  (TeleOp uses ${gain})", gain);`);
+    P('            telemetry.addLine("--- selected ---");',
+      '            String reading = describe(selected, true);',
+      '            if (a && !prevA) {',
+      '                samples.addFirst(NAMES[selected] + ": " + describe(selected, false));',
+      '                while (samples.size() > 3) samples.removeLast();',
+      '            }',
+      '            prevA = a;',
+      '            telemetry.addLine(reading);',
+      '            telemetry.addLine("--- all ---");',
+      '            for (int i = 0; i < NAMES.length; i++) {',
+      '                if (i == selected) continue;',
+      '                telemetry.addData(NAMES[i], describe(i, false));',
+      '            }');
+    if (sensorRules.length) {
+      P('            telemetry.addLine("--- rules, live ---");');
+      sensorRules.forEach(({ r }) => {
+        const conds = sensorConds(r).map(ruleConditionJava).filter(Boolean);
+        if (conds.length) P(`            telemetry.addData("${javaString(r.name)}", (${conds.join(' && ')}) ? "YES" : "no");`);
+      });
+    }
+    P('            if (!samples.isEmpty()) {',
+      '                telemetry.addLine("--- samples (A) ---");',
+      '                for (String s : samples) telemetry.addLine(s);',
+      '            }',
+      '            telemetry.addData("Loop", "%dms", (int) loopTimer.milliseconds());',
+      '            loopTimer.reset();',
+      '            telemetry.update();',
+      '        }',
+      '    }',
+      '',
+      '    private void resetStats() {',
+      '        for (int i = 0; i < NAMES.length; i++) { minSeen[i] = Double.MAX_VALUE; maxSeen[i] = -Double.MAX_VALUE; presses[i] = 0; }',
+      '    }',
+      '');
+    if (colour.length) {
+      P('    private void applyGain() {');
+      colour.forEach(x => P(`        ((NormalizedColorSensor) ${x.var}).setGain(gain);`));
+      P('    }',
+        '',
+        '    /** Hue 0-360, saturation 0-1, value 0-1 — the numbers the Rules tab wants. */',
+        '    private static float[] hsv(ColorSensor s) {',
+        '        float[] out = new float[3];',
+        '        NormalizedRGBA c = ((NormalizedColorSensor) s).getNormalizedColors();',
+        '        Color.colorToHSV(c.toColor(), out);',
+        '        return out;',
+        '    }',
+        '');
+    }
+    P('    /** One sensor as text. Full adds the min/max line; short is one line for the list and samples. */',
+      '    private String describe(int i, boolean full) {',
+      '        switch (i) {');
+    list.forEach((x, i) => {
+      P(`            case ${i}: {`);
+      if (x.kind === 'color') {
+        P(`                float[] h = hsv(${x.var});`,
+          `                double d = ((DistanceSensor) ${x.var}).getDistance(DistanceUnit.INCH);`,
+          `                track(i, h[0]);`,
+          `                String s = String.format(Locale.US, "hue %.0f  sat %.2f  val %.3f  |  R %d G %d B %d  |  %.1f in",`,
+          `                        h[0], h[1], h[2], ${x.var}.red(), ${x.var}.green(), ${x.var}.blue(), d);`,
+          `                return full ? s + String.format(Locale.US, "\\nhue min %.0f  max %.0f since reset", minSeen[i], maxSeen[i]) : s;`);
+      } else if (x.kind === 'distance') {
+        P(`                double d = ${x.var}.getDistance(DistanceUnit.INCH);`,
+          `                track(i, d);`,
+          `                String s = String.format(Locale.US, "%.2f in", d);`,
+          `                return full ? s + String.format(Locale.US, "   min %.2f  max %.2f", minSeen[i], maxSeen[i]) : s;`);
+      } else if (x.kind === 'touch' || x.kind === 'limit') {
+        const pressed = x.javaType === 'DigitalChannel' ? `!${x.var}.getState()` : `${x.var}.isPressed()`;
+        P(`                boolean p = ${pressed};`,
+          `                if (p && !wasPressed[i]) presses[i]++;`,
+          `                wasPressed[i] = p;`,
+          `                return (p ? "PRESSED" : "open") + "   presses since reset: " + presses[i];`);
+      } else if (x.javaType === 'AnalogInput') {
+        P(`                double v = ${x.var}.getVoltage();`,
+          `                track(i, v);`,
+          `                return full ? String.format(Locale.US, "%.3f V   min %.3f  max %.3f", v, minSeen[i], maxSeen[i]) : String.format(Locale.US, "%.3f V", v);`);
+      } else if (x.javaType === 'DigitalChannel') {
+        P(`                return ${x.var}.getState() ? "HIGH" : "LOW";`);
+      } else {
+        P(`                return "(no readout for ${javaString(x.label)})";`);
+      }
+      P('            }');
+    });
+    P('            default: return "";',
+      '        }',
+      '    }',
+      '',
+      '    private void track(int i, double v) {',
+      '        if (v < minSeen[i]) minSeen[i] = v;',
+      '        if (v > maxSeen[i]) maxSeen[i] = v;',
+      '    }');
+    // The same helpers TeleOp uses, so the verdict here is the verdict there.
+    if (condModes.has('ratio')) P('', ...RULE_SEES_COLOR_JAVA);
+    if (condModes.has('hue')) P('', ...RULE_SEES_HUE_JAVA);
+    if (condModes.has('rgb')) P('', ...RULE_SEES_RGB_JAVA);
+    P('}');
     return L.join('\n');
   };
 
@@ -3180,6 +3476,11 @@ ${(() => {
     need.add('org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit');
     need.add('com.qualcomm.robotcore.hardware.DistanceSensor');
   }
+  if (rulesNeedHue() || rulesNeedColor() || rulesNeedRgb()) need.add('com.qualcomm.robotcore.hardware.NormalizedColorSensor');
+  if (rulesNeedHue()) {
+    need.add('com.qualcomm.robotcore.hardware.NormalizedRGBA');
+    need.add('android.graphics.Color');
+  }
   return Array.from(need).sort().map(p => `import ${p};`).join('\n');
 })()}
 
@@ -3263,7 +3564,7 @@ ${driveLimitEnabled ? `
 ` : ''}${activeRules().length > 0 ? `
     // Rule states (Rules tab). <name>On is whether the rule is acting this
     // loop; a latched rule stays on after its condition clears until START.
-${activeRules().map((r, i) => `    private boolean rule${i + 1}On = false;   // ${r.name}${r.mode === 'latch' ? ' (latch)' : ''}${((r.action && r.action.type === 'start_macro') || (r.elseAction && r.elseAction.type === 'start_macro')) ? `\n    private boolean rule${i + 1}Prev = false;` : ''}`).join('\n')}
+${activeRules().map((r, i) => `    private boolean rule${i + 1}On = false;   // ${r.name}${r.mode === 'latch' ? ' (latch)' : ''}${[...ruleActions(r), ...ruleElseActions(r)].some(a => a.type === 'start_macro') ? `\n    private boolean rule${i + 1}Prev = false;` : ''}`).join('\n')}
 ` : ''}
     // Timers
     private ElapsedTime loopTimer = new ElapsedTime();
@@ -3333,6 +3634,11 @@ ${sensors.map(sn => {
   let code = `        ${v} = hardwareMap.get(${info.javaType || 'DigitalChannel'}.class, "${javaString(sn.name)}");`;
   if ((info.javaType || '') === 'DigitalChannel') {
     code += `\n        ${v}.setMode(DigitalChannel.Mode.INPUT);`;
+  }
+  if (info.type === 'color' && (rulesNeedHue() || rulesNeedColor() || rulesNeedRgb())) {
+    // Gain scales every reading, so TeleOp must run the same gain the Sensor
+    // Test was tuned at or the thresholds mean something else here.
+    code += `\n        ((NormalizedColorSensor) ${v}).setGain(${Number(colorSensorGain) || 8}f);   // same gain as the Sensor Test`;
   }
   return code;
 }).join('\n')}` : ''}
@@ -3911,7 +4217,7 @@ ${servos.length > 0 ? `            // === SERVO CONTROLS ===
 ${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
 ${macros.length > 0 ? `            } // End of driver-control block` : ''}${activeRules().length > 0 ? (() => {
   const velNames = velocityMotors.map(m => m.name);
-  const anyLed = activeRules().some(r => (r.action && r.action.type === 'led') || (r.elseAction && r.elseAction.type === 'led'));
+  const anyLed = activeRules().some(r => [...ruleActions(r), ...ruleElseActions(r)].some(a => a.type === 'led'));
   const ind = '                ';
   return `
             // === RULES ===
@@ -3930,10 +4236,13 @@ ${macros.length > 0 ? `            } // End of driver-control block` : ''}${acti
 ${anyLed ? '            boolean ruleLed = false;   // a rule set the LED this loop; the status LED yields\n' : ''}${activeRules().map((r, i) => {
     const n = i + 1;
     const cond = (r.conditions || []).map(ruleConditionJava).filter(Boolean).join('\n' + ind + '    && ');
-    const act = (ruleActionJava(r.action, velNames) || []).map(l => ind + '    ' + l).join('\n');
     const latch = r.mode === 'latch';
-    const elseAct = ruleHasElse(r) ? (ruleActionJava(r.elseAction, velNames) || []).map(l => ind + '    ' + l).join('\n') : null;
-    const ledFlag = (a) => a && a.type === 'led' ? `\n${ind}    ruleLed = true;` : '';
+    const acts = ruleActions(r), elses = ruleElseActions(r);
+    // Statements for a list of actions, with the LED flag once if any is an LED.
+    const body = (list) => list.flatMap(a => ruleActionJava(a, velNames) || []).map(l => ind + '    ' + l).join('\n')
+      + (list.some(a => a.type === 'led') ? `\n${ind}    ruleLed = true;` : '');
+    const plainActs = acts.filter(a => a.type !== 'start_macro'), macroActs = acts.filter(a => a.type === 'start_macro');
+    const plainElses = elses.filter(a => a.type !== 'start_macro'), macroElses = elses.filter(a => a.type === 'start_macro');
     // A rule that starts a macro fires on the loop its condition becomes true,
     // not on every loop it stays true — otherwise a hold-style macro that ends
     // on release would restart the instant it finished.
@@ -3944,7 +4253,7 @@ ${anyLed ? '            boolean ruleLed = false;   // a rule set the LED this lo
     // is what "press A: if the tag is visible shoot, otherwise reposition"
     // means, and a plain else-on-false would start the ELSE macro every loop
     // the button sat idle.
-    const edge = (r.action && r.action.type === 'start_macro') || (r.elseAction && r.elseAction.type === 'start_macro');
+    const edge = macroActs.length > 0 || macroElses.length > 0;
     const condList = (r.conditions || []).map(ruleConditionJava).filter(Boolean);
     const trig = condList[0];
     const decide = condList.length > 1 ? condList.slice(1).join('\n' + ind + '    && ') : 'true';
@@ -3956,12 +4265,18 @@ ${edge ? `                boolean trigger = ${trig};
                 rule${n}Prev = trigger;
                 boolean holds = trigger && decision;` : `                boolean holds = ${cond};`}
 ${latch ? `                if (gamepad1.start || gamepad2.start) rule${n}On = false;
-                if (holds) rule${n}On = true;` : `                rule${n}On = holds;`}
-                if (${r.action.type === 'start_macro' ? `rule${n}Rose && decision` : `rule${n}On`}) {
-${act}${ledFlag(r.action)}
-                }${elseAct !== null ? `
-                ${r.elseAction.type === 'start_macro' ? `if (rule${n}Rose && !decision) {   // ELSE: trigger fired, decision false` : `if (!rule${n}On) {   // ELSE`}
-${elseAct}${ledFlag(r.elseAction)}
+                if (holds) rule${n}On = true;` : `                rule${n}On = holds;`}${plainActs.length ? `
+                if (rule${n}On) {
+${body(plainActs)}
+                }` : ''}${macroActs.length ? `
+                if (rule${n}Rose && decision) {   // once per press
+${body(macroActs)}
+                }` : ''}${plainElses.length ? `
+                if (!rule${n}On) {   // ELSE
+${body(plainElses)}
+                }` : ''}${macroElses.length ? `
+                if (rule${n}Rose && !decision) {   // ELSE: trigger fired, decision false
+${body(macroElses)}
                 }` : ''}
             }`;
   }).join('\n')}`;
@@ -4004,7 +4319,7 @@ ${ledStatusActive ? `
             // this is an unguarded block rather than a reference to a field
             // that was never declared.
             ${(() => {
-              const ledRule = activeRules().some(r => (r.action && r.action.type === 'led') || (r.elseAction && r.elseAction.type === 'led'));
+              const ledRule = activeRules().some(r => [...ruleActions(r), ...ruleElseActions(r)].some(a => a.type === 'led'));
               const parts = [];
               if (ledRule) parts.push('!ruleLed');
               if (macros.length > 0) parts.push('activeMacro == -1');
@@ -4179,7 +4494,7 @@ ${rulesNeedTag() ? '\n' + TARGET_VISIBLE_JAVA.join('\n') + '\n' : ''}
         return v < lo ? lo : (v > hi ? hi : v);
     }
 ` : ''}
-${rulesNeedColor() ? RULE_SEES_COLOR_JAVA.join('\n') + '\n\n' : ''}${(() => {
+${rulesNeedColor() ? RULE_SEES_COLOR_JAVA.join('\n') + '\n\n' : ''}${rulesNeedHue() ? RULE_SEES_HUE_JAVA.join('\n') + '\n\n' : ''}${rulesNeedRgb() ? RULE_SEES_RGB_JAVA.join('\n') + '\n\n' : ''}${(() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
     return `    /** Robot-oriented mixing, shared by the tag helpers. */
@@ -7382,7 +7697,9 @@ Make sure your code initializes the IMU with these orientations!
         const updateCond = (rule, idx, patch) => updateRule(rule.id, { conditions: rule.conditions.map((c, i) => i === idx ? { ...c, ...patch } : c) });
         const newCond = (type) => {
           switch (type) {
-            case 'color': return { type, sensor: colorSensors[0]?.name || '', color: 'red', ratio: 1.4, min: 300 };
+            case 'color': return { type, sensor: colorSensors[0]?.name || '', color: 'red', mode: 'hue',
+              hue: 0, hueTol: 25, minSat: 0.3, minVal: 0, ratio: 1.4, min: 300,
+              rMin: 0, rMax: 65535, gMin: 0, gMax: 65535, bMin: 0, bMax: 65535 };
             case 'distance': return { type, sensor: rangeSensors[0]?.name || '', op: '<', inches: 2 };
             case 'velocity': return { type, motor: encoderMotors[0]?.name || '', op: 'above', value: 1000 };
             case 'button': return { type, controller: 'gamepad1', button: 'a' };
@@ -7406,7 +7723,7 @@ Make sure your code initializes the IMU with these orientations!
         const addRule = () => {
           const id = rules.length > 0 ? Math.max(...rules.map(r => r.id)) + 1 : 1;
           setRules([...rules, { id, name: `Rule ${id}`, enabled: true, mode: 'while', runInAuto: false,
-            conditions: [newCond(colorSensors.length ? 'color' : 'button')], action: newAction('motor_power') }]);
+            conditions: [newCond(colorSensors.length ? 'color' : 'button')], actions: [newAction('motor_power')], elseActions: [] }]);
         };
         const condEditor = (rule, c, idx) => (
           <div key={idx} className="flex flex-wrap items-center gap-2 bg-gray-800 rounded p-2">
@@ -7438,14 +7755,56 @@ Make sure your code initializes the IMU with these orientations!
                 {colorSensors.length === 0 && <option value="">(no colour sensor)</option>}
                 {colorSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
               </select>
-              <select className={sel} value={c.color} onChange={(e) => updateCond(rule, idx, { color: e.target.value })}>
+              <select className={sel} value={c.color} onChange={(e) => updateCond(rule, idx, { color: e.target.value, ...(RULE_HUE_PRESET[e.target.value] !== undefined ? { hue: RULE_HUE_PRESET[e.target.value] } : {}) })}>
                 <option value="red">red</option><option value="blue">blue</option><option value="green">green</option>
+                <option value="custom">custom hue…</option>
                 <option value="any">anything (object present)</option><option value="none">nothing</option>
               </select>
-              <span className="text-xs text-gray-400">ratio</span>
-              <input type="number" step="0.1" min="1" className={inp} value={c.ratio} onChange={(e) => updateCond(rule, idx, { ratio: parseFloat(e.target.value) })} />
-              <span className="text-xs text-gray-400">min R+G+B</span>
-              <input type="number" step="50" min="0" className={inp} value={c.min} onChange={(e) => updateCond(rule, idx, { min: parseFloat(e.target.value) })} />
+              {(c.color === 'any' || c.color === 'none') ? (<>
+                <select className={sel} value={(c.mode || 'hue') === 'hue' ? 'hue' : 'ratio'} onChange={(e) => updateCond(rule, idx, { mode: e.target.value })}>
+                  <option value="hue">by brightness (value)</option><option value="ratio">by raw R+G+B</option>
+                </select>
+                {(c.mode || 'hue') === 'hue' ? (<>
+                  <span className="text-xs text-gray-400">min val</span>
+                  <input type="number" step="0.01" min="0" max="1" className={inp} value={c.minVal ?? 0.1} onChange={(e) => updateCond(rule, idx, { minVal: parseFloat(e.target.value) })} />
+                </>) : (<>
+                  <span className="text-xs text-gray-400">min R+G+B</span>
+                  <input type="number" step="50" min="0" className={inp} value={c.min} onChange={(e) => updateCond(rule, idx, { min: parseFloat(e.target.value) })} />
+                </>)}
+              </>) : (<>
+                <select className={sel} value={c.mode || 'hue'} onChange={(e) => updateCond(rule, idx, { mode: e.target.value })}>
+                  <option value="hue">by hue (recommended)</option>
+                  <option value="ratio">by channel ratio</option>
+                  <option value="rgb">by R/G/B ranges</option>
+                </select>
+                {(c.mode || 'hue') === 'hue' && (<>
+                  <span className="text-xs text-gray-400">hue</span>
+                  <input type="number" step="1" min="0" max="360" className={inp} value={c.color === 'custom' ? (c.hue ?? 0) : (RULE_HUE_PRESET[c.color] ?? 0)} disabled={c.color !== 'custom'}
+                    onChange={(e) => updateCond(rule, idx, { hue: parseFloat(e.target.value) })} />
+                  <span className="text-xs text-gray-400">±</span>
+                  <input type="number" step="1" min="1" max="180" className={inp} value={c.hueTol ?? 25} onChange={(e) => updateCond(rule, idx, { hueTol: parseFloat(e.target.value) })} />
+                  <span className="text-xs text-gray-400">min sat</span>
+                  <input type="number" step="0.05" min="0" max="1" className={inp} value={c.minSat ?? 0.3} onChange={(e) => updateCond(rule, idx, { minSat: parseFloat(e.target.value) })} />
+                  <span className="text-xs text-gray-400">min val</span>
+                  <input type="number" step="0.01" min="0" max="1" className={inp} value={c.minVal ?? 0} onChange={(e) => updateCond(rule, idx, { minVal: parseFloat(e.target.value) })} />
+                </>)}
+                {c.mode === 'ratio' && (<>
+                  <span className="text-xs text-gray-400">ratio</span>
+                  <input type="number" step="0.1" min="1" className={inp} value={c.ratio ?? 1.4} onChange={(e) => updateCond(rule, idx, { ratio: parseFloat(e.target.value) })} />
+                  <span className="text-xs text-gray-400">min R+G+B</span>
+                  <input type="number" step="50" min="0" className={inp} value={c.min ?? 300} onChange={(e) => updateCond(rule, idx, { min: parseFloat(e.target.value) })} />
+                </>)}
+                {c.mode === 'rgb' && (<>
+                  {[['R', 'rMin', 'rMax'], ['G', 'gMin', 'gMax'], ['B', 'bMin', 'bMax']].map(([lbl, lo, hi]) => (
+                    <React.Fragment key={lbl}>
+                      <span className="text-xs text-gray-400">{lbl}</span>
+                      <input type="number" step="10" min="0" className={inp} value={c[lo] ?? 0} onChange={(e) => updateCond(rule, idx, { [lo]: parseFloat(e.target.value) })} />
+                      <span className="text-xs text-gray-400">–</span>
+                      <input type="number" step="10" min="0" className={inp} value={c[hi] ?? 65535} onChange={(e) => updateCond(rule, idx, { [hi]: parseFloat(e.target.value) })} />
+                    </React.Fragment>
+                  ))}
+                </>)}
+              </>)}
             </>)}
             {c.type === 'distance' && (<>
               <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
@@ -7489,15 +7848,18 @@ Make sure your code initializes the IMU with these orientations!
             )}
           </div>
         );
-        const actionEditor = (rule, key = 'action') => {
-          const a = rule[key] || {};
-          const isElse = key === 'elseAction';
-          const upd = (patch) => updateRule(rule.id, { [key]: { ...a, ...patch } });
+        // Action lists. Older rules stored a single `action` / `elseAction`;
+        // ruleActions() reads both shapes, and any edit writes the list shape.
+        const setActions = (rule, key, list) => updateRule(rule.id, { [key]: list, [key === 'actions' ? 'action' : 'elseAction']: undefined });
+        const actionEditor = (rule, key, list, idx) => {
+          const a = list[idx] || {};
+          const isElse = key === 'elseActions';
+          const upd = (patch) => setActions(rule, key, list.map((x, i) => i === idx ? { ...x, ...patch } : x));
+          const replace = (type) => setActions(rule, key, list.map((x, i) => i === idx ? newAction(type) : x));
           return (
-            <div className="flex flex-wrap items-center gap-2 bg-gray-800 rounded p-2">
-              <span className="text-xs text-gray-400 w-10">{isElse ? 'ELSE' : 'THEN'}</span>
-              <select className={sel} value={a.type || ''} onChange={(e) => updateRule(rule.id, { [key]: e.target.value ? newAction(e.target.value) : null })}>
-                {isElse && <option value="">(no ELSE)</option>}
+            <div key={`${key}${idx}`} className="flex flex-wrap items-center gap-2 bg-gray-800 rounded p-2">
+              <span className="text-xs text-gray-400 w-10">{idx === 0 ? (isElse ? 'ELSE' : 'THEN') : 'and'}</span>
+              <select className={sel} value={a.type || ''} onChange={(e) => replace(e.target.value)}>
                 <option value="motor_power">set motor power</option>
                 <option value="motor_velocity">set motor velocity</option>
                 <option value="motor_stop">stop motor</option>
@@ -7541,8 +7903,23 @@ Make sure your code initializes the IMU with these orientations!
                   {blinkinPatterns.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
                 </select>
               )}
+              {(list.length > 1 || isElse) && (
+                <button onClick={() => setActions(rule, key, list.filter((_, i) => i !== idx))}
+                  className="ml-auto text-red-400 hover:text-red-300 text-xs">remove</button>
+              )}
             </div>
           );
+        };
+        const actionList = (rule, key) => {
+          const list = key === 'actions' ? ruleActions(rule) : ruleElseActions(rule);
+          const isElse = key === 'elseActions';
+          return (<>
+            {list.map((_, idx) => actionEditor(rule, key, list, idx))}
+            <button onClick={() => setActions(rule, key, [...list, newAction('motor_power')])}
+              className="text-xs text-blue-300 hover:text-blue-200">
+              {list.length === 0 ? (isElse ? '+ ELSE action (when the condition is false)' : '+ action') : (isElse ? '+ and also (ELSE)' : '+ and also')}
+            </button>
+          </>);
         };
         return (
           <div className="space-y-6">
@@ -7554,17 +7931,28 @@ Make sure your code initializes the IMU with these orientations!
               <strong className="text-gray-200">WHEN</strong> a condition holds, <strong className="text-gray-200">THEN</strong> do something —
               checked every loop, after the driver's controls, so the rule wins. <strong className="text-gray-200">While</strong> rules
               act only while the condition is true; <strong className="text-gray-200">Latch</strong> rules stay on until START is pressed.
-              Sensors come from the Sensors tab. For colour thresholds, tick <em>Color sensors</em> in the Telemetry tab, run the
-              robot, and read the raw R/G/B with and without a ball: <em>ratio</em> is how much the wanted colour must beat the
-              other two (1.4 = 40% more); <em>min R+G+B</em> rejects an empty view. A While rule can also have an
-              <strong className="text-gray-200"> ELSE</strong> action for when the condition is false. <em>Start macro</em> fires
+              Sensors come from the Sensors tab. For colour thresholds, generate the <em>Sensor Test</em> from the Code tab,
+              hold each game piece in front of the sensor, press A, and read the <em>hue</em>: pick the preset if it is close,
+              otherwise <em>custom</em> and type it. Hue barely changes with distance or lighting; the raw R/G/B modes are there
+              for when you want to see exactly what the sensor sees. A rule can do several things
+              (<em>+ and also</em>), and a While rule can also have <strong className="text-gray-200">ELSE</strong> actions
+              for when the condition is false. <em>Start macro</em> fires
               once, when no macro is already running: the <em>first</em> condition is the trigger (a button, say) and any
               further condition is the decision — THEN when the trigger is pressed and the decision is true, ELSE when it
               is pressed and the decision is false. Rules also go into the
               PathPilot profile, with the Java for each condition.
             </div>
+            {colorSensors.length > 0 && (
+              <div className="flex items-center gap-2 text-sm text-gray-300">
+                <span>Colour sensor gain</span>
+                <select className={sel} value={colorSensorGain} onChange={(e) => setColorSensorGain(parseFloat(e.target.value))}>
+                  {[1, 2, 4, 8, 16, 32].map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+                <span className="text-xs text-gray-400">applied in the Sensor Test and in any TeleOp with colour rules, so thresholds carry over. Change it, then re-read your samples.</span>
+              </div>
+            )}
             {rules.length === 0 ? (
-              <p className="text-gray-400 text-sm">No rules yet. Example: WHEN colour sensor sees red THEN set intake power −0.6.</p>
+              <p className="text-gray-400 text-sm">No rules yet. Example: WHEN colour sensor sees red THEN set intake power −0.6 and also set servo to 0.54.</p>
             ) : rules.map((rule, ri) => {
               const problem = ruleProblem(rule);
               return (
@@ -7591,16 +7979,16 @@ Make sure your code initializes the IMU with these orientations!
                     <button onClick={() => updateRule(rule.id, { conditions: [...rule.conditions, newCond('button')] })}
                       className="text-xs text-blue-300 hover:text-blue-200">+ AND another condition</button>
                   )}
-                  {actionEditor(rule)}
-                  {(rule.mode || 'while') === 'while' && actionEditor(rule, 'elseAction')}
+                  {actionList(rule, 'actions')}
+                  {(rule.mode || 'while') === 'while' && actionList(rule, 'elseActions')}
                   {problem && rule.enabled !== false && (
                     <div className="text-xs text-red-300">Not generated: this rule {problem}.</div>
                   )}
                   {!problem && (
                     <div className="text-xs text-gray-500 font-mono">
                       if ({rule.conditions.map(ruleConditionJava).filter(Boolean).join(' && ')}) {'{ '}
-                      {(ruleActionJava(rule.action, []) || []).join(' ')}{' }'}
-                      {ruleHasElse(rule) && <> else {'{ '}{(ruleActionJava(rule.elseAction, []) || []).join(' ')}{' }'}</>}
+                      {ruleActions(rule).flatMap(a => ruleActionJava(a, []) || []).join(' ')}{' }'}
+                      {ruleHasElse(rule) && <> else {'{ '}{ruleElseActions(rule).flatMap(a => ruleActionJava(a, []) || []).join(' ')}{' }'}</>}
                     </div>
                   )}
                 </div>
@@ -7801,6 +8189,7 @@ Make sure your code initializes the IMU with these orientations!
         const currentCode = codeOutputMode === 'teleop' ? generateCompleteTeleOp()
           : codeOutputMode === 'calibration' ? generateOdometryCalibration()
           : codeOutputMode === 'motortest' ? generateMotorTest()
+          : codeOutputMode === 'sensortest' ? generateSensorTest()
           : generateCodeSnippet();
         return (
           <div className="space-y-6">
@@ -7826,6 +8215,16 @@ Make sure your code initializes the IMU with these orientations!
                   }`}
                 >
                   Motor Test
+                </button>
+                <button
+                  onClick={() => setCodeOutputMode('sensortest')}
+                  className={`px-3 py-1 rounded text-sm font-medium ${
+                    codeOutputMode === 'sensortest'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                  }`}
+                >
+                  Sensor Test
                 </button>
                 <button
                   onClick={() => setCodeOutputMode('calibration')}
@@ -7859,6 +8258,12 @@ Make sure your code initializes the IMU with these orientations!
                 new chassis the point is to find out which way "forward" actually goes. Watch the wheel, then tick
                 Reverse Direction for any that are backwards. Triggers give variable power, useful for finding the
                 lowest power that moves the robot from a standstill.</p>
+              ) : codeOutputMode === 'sensortest' ? (
+                <p>🔍 <strong>Sensor Test:</strong> Live readout of every configured sensor — raw R/G/B, hue/sat/val and
+                distance for colour sensors, inches for distance sensors, pressed/open with a press counter for switches.
+                Press A to capture a sample (three stay on screen) so two game pieces can be compared. Any rule that reads
+                a sensor shows its live YES/no verdict, using the same helper code the TeleOp runs. Colour gain here and
+                in the TeleOp are both set from the Rules tab so thresholds carry over.</p>
               ) : codeOutputMode === 'calibration' ? (
                 <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets in five tests: port scan, straight push, two-push strafe, spin, verify. Motor names come from this configuration, so there is nothing to hand-edit. The <strong>port scan</strong> shows which ports actually move, so a mis-wired pod is visible instead of silently reading zero; the <strong>two-push strafe</strong> catches a reversed pod by checking that left and right disagree in sign.</p>
               ) : (
@@ -7889,6 +8294,20 @@ Make sure your code initializes the IMU with these orientations!
                   <li>For a mecanum drivetrain, all four should drive the robot forward. Any that do not need Reverse ticked in BotBuilder</li>
                   <li>Squeeze the right trigger slowly to find the lowest power that moves it — that is your MIN_POWER</li>
                 </ol>
+              </div>
+            )}
+            {codeOutputMode === 'sensortest' && (
+              <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
+                <h4 className="text-blue-400 font-semibold mb-2">🔍 Setting colour thresholds:</h4>
+                <ol className="text-blue-200 space-y-1 list-decimal list-inside">
+                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'SensorTest')}.java</code> and Build</li>
+                  <li>Run it with the robot where it will play — lighting matters</li>
+                  <li>Hold a game piece where the sensor will see it in a match; press <strong>A</strong>. Repeat for each colour and once with nothing there</li>
+                  <li>Read the <strong>hue</strong> of each sample. In the Rules tab pick the colour preset if the hue is within ~20° of it, otherwise choose <em>custom</em> and type the hue; set the tolerance to about half the gap between the two closest colours</li>
+                  <li>Set <em>min sat</em> just below the lowest saturation of a real piece (rejects grey/white), and <em>min val</em> just above the empty-view value</li>
+                  <li>Regenerate the Sensor Test — the rule's live YES/no line now shows the decision as you wave the pieces</li>
+                </ol>
+                <p className="text-blue-300 mt-2 text-xs">Hue barely changes with distance or brightness; raw R/G/B changes a lot. If the hue min/max line swings more than ±15° on a steady piece, shade the sensor from the room lights.</p>
               </div>
             )}
             {codeOutputMode === 'calibration' && (
