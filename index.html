@@ -238,6 +238,14 @@ const FTCRobotConfigurator = () => {
 
   const [slowModeButton, setSlowModeButton] = React.useState('none');
   const [slowModeSpeed, setSlowModeSpeed] = React.useState(0.4);
+  // Drive power limiting. Off by default so an existing config generates the
+  // same TeleOp it always did. On, it caps the drive at driveMaxPower and
+  // ramps stick input over driveRampMs — the ramp removes the stall-current
+  // spike on a hard reversal (which browns out a hub and lifts the front
+  // wheels), the cap trims sustained draw when pushing against something.
+  const [driveLimitEnabled, setDriveLimitEnabled] = React.useState(false);
+  const [driveMaxPower, setDriveMaxPower] = React.useState(0.8);
+  const [driveRampMs, setDriveRampMs] = React.useState(150);
 
   // Motor Controls (map motor name to control config)
   const [motorControls, setMotorControls] = React.useState({});
@@ -931,6 +939,18 @@ const FTCRobotConfigurator = () => {
       }));
     })();
 
+    // Drive power limiting. Out-of-range values would generate code that
+    // either never moves or throws in setPower().
+    if (driveLimitEnabled) {
+      const mp = Number(driveMaxPower), rm = Number(driveRampMs);
+      if (!Number.isFinite(mp) || mp < 0.1 || mp > 1) {
+        warnings.push({ type: 'error', message: `Drive max power is ${driveMaxPower}. It must be between 0.1 and 1.0.` });
+      }
+      if (!Number.isFinite(rm) || rm < 0 || rm > 1000) {
+        warnings.push({ type: 'error', message: `Drive ramp time is ${driveRampMs} ms. It must be between 0 (no ramp) and 1000.` });
+      }
+    }
+
     // Clusters. A tag in two clusters makes the generated code aim at whichever
     // cluster's constant happens to be checked first — silently.
     (() => {
@@ -1169,7 +1189,8 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
+      slowModeButton, slowModeSpeed, driveLimitEnabled, driveMaxPower, driveRampMs,
+      robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
@@ -1274,6 +1295,9 @@ const FTCRobotConfigurator = () => {
     setSlowModeButton(config.slowModeButton || 'none');
     // Zero is a legal slow-mode speed — it makes the button a hold-to-stop.
     setSlowModeSpeed(numOr(config.slowModeSpeed, 0.4));
+    setDriveLimitEnabled(!!config.driveLimitEnabled);
+    setDriveMaxPower(numOr(config.driveMaxPower, 0.8));
+    setDriveRampMs(numOr(config.driveRampMs, 150));
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setServoControls(config.servoControls || {});
@@ -1325,7 +1349,8 @@ const FTCRobotConfigurator = () => {
       sensors, aprilTagSize, targetTags, clusters, clusterTagOffsets,
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
-      slowModeButton, slowModeSpeed, robotOrientedButton, motorControls, servoControls,
+      slowModeButton, slowModeSpeed, driveLimitEnabled, driveMaxPower, driveRampMs,
+      robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
       telemetryBattery, telemetryLoopTime, telemetryAlerts,
@@ -1621,6 +1646,9 @@ const FTCRobotConfigurator = () => {
         // Recorded for reference. PathPilot forces BRAKE in autonomous whatever
         // this says, because a coasting robot cannot settle inside tolerance.
         teleopZeroPower: driveZeroPower,
+        // TeleOp drive limiting, for reference. null when off.
+        teleopMaxPower: driveLimitEnabled ? Number(driveMaxPower) : null,
+        teleopRampMs: driveLimitEnabled ? Number(driveRampMs) : null,
         wheelDiameterMm: Number(wheelSize) || null,
         wheelDiameterIn: wheelSize ? Math.round((Number(wheelSize) / 25.4) * 1000) / 1000 : null,
         measured: { maxVelocityInPerSec: null, maxAccelInPerSec2: null, maxTurnRateDegPerSec: null }
@@ -2908,7 +2936,22 @@ ${(hasOdometry && (() => { const p = podInfo(); return p.parallel.varName && p.p
 ${driveLayout().kind === 'mecanum' ? `    /** Field-oriented until the driver toggles it off. */
     private boolean fieldOriented = true;${robotOrientedButton !== 'none' ? `
     private boolean orientationButtonPrev = false;` : ''}` : ''}
-
+${driveLimitEnabled ? `
+    // Drive power limiting (set in BotBuilder's Drive tab).
+    //
+    // MAX caps every drive axis. RAMP_SEC is how long a stick takes to go
+    // from rest to full as the robot sees it: the commanded value may only
+    // move toward the stick by (loop time / RAMP_SEC) per iteration. A stick
+    // slammed from +1 to -1 is the largest current draw a drivetrain makes —
+    // four motors stalled against their own momentum — and it is the one
+    // that browns out a hub and lifts the front wheels. Spreading it over a
+    // few loops removes the spike without changing where the robot ends up.
+    // Set RAMP_SEC to 0 to keep the cap and drop the ramp.
+    private static final double DRIVE_MAX_POWER = ${Number(driveMaxPower)};
+    private static final double DRIVE_RAMP_SEC = ${Number(driveRampMs) / 1000};
+    private double forwardCmd = 0, strafeCmd = 0, rotateCmd = 0;
+    private ElapsedTime rampTimer = new ElapsedTime();
+` : ''}
     // Timers
     private ElapsedTime loopTimer = new ElapsedTime();
     private ElapsedTime macroTimer = new ElapsedTime();
@@ -3465,7 +3508,28 @@ ${slowModeButton !== 'none' ? `            // Slow mode
             forward *= speedMultiplier;
             strafe *= speedMultiplier;
             rotate *= speedMultiplier;` : ''}
-
+${driveLimitEnabled ? `
+            // Drive power limiting — see DRIVE_MAX_POWER / DRIVE_RAMP_SEC above.
+            //
+            // The ramp works on the stick values, before the field-oriented
+            // transform and the mecanum mixing, so it limits what the driver
+            // asks for rather than what each wheel gets; the mixing below
+            // still decides how that request is shared out. After a gap of
+            // more than a quarter second (a macro had the drivetrain, or the
+            // loop stalled) the ramp restarts from rest instead of jumping.
+            {
+                double dt = rampTimer.seconds();
+                rampTimer.reset();
+                if (dt > 0.25) { forwardCmd = 0; strafeCmd = 0; rotateCmd = 0; }
+                double maxStep = DRIVE_RAMP_SEC > 0 ? dt / DRIVE_RAMP_SEC : 2.0;
+                forwardCmd += Math.max(-maxStep, Math.min(maxStep, forward - forwardCmd));
+                strafeCmd  += Math.max(-maxStep, Math.min(maxStep, strafe  - strafeCmd));
+                rotateCmd  += Math.max(-maxStep, Math.min(maxStep, rotate  - rotateCmd));
+                forward = forwardCmd * DRIVE_MAX_POWER;
+                strafe  = strafeCmd  * DRIVE_MAX_POWER;
+                rotate  = rotateCmd  * DRIVE_MAX_POWER;
+            }
+` : ''}
 ${(() => {
   const dl = driveLayout();
   if (dl.kind === 'mecanum') {
@@ -5556,6 +5620,52 @@ Make sure your code initializes the IMU with these orientations!
                   The heading reset and orientation toggle do not apply.
                 </div>
               )}
+
+              {/* Drive power limiting */}
+              <div className="mt-3 p-3 rounded border border-gray-600 bg-gray-800">
+                <label className="flex items-center gap-2 text-sm text-white cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={driveLimitEnabled}
+                    onChange={(e) => setDriveLimitEnabled(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  <span className="font-semibold">Drive power limiting</span>
+                  <span className="text-xs text-gray-400">(off = generated drive code unchanged)</span>
+                </label>
+                {driveLimitEnabled && (
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">Max drive power</label>
+                      <input
+                        type="number" min="0.1" max="1" step="0.05"
+                        value={driveMaxPower}
+                        onChange={(e) => setDriveMaxPower(parseFloat(e.target.value))}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      />
+                      <span className="text-xs text-gray-400">1.0 = full. Slow mode still applies on top.</span>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">Ramp time (ms)</label>
+                      <input
+                        type="number" min="0" max="1000" step="10"
+                        value={driveRampMs}
+                        onChange={(e) => setDriveRampMs(parseFloat(e.target.value))}
+                        className="w-full bg-gray-600 border border-gray-500 rounded px-3 py-2 text-white"
+                      />
+                      <span className="text-xs text-gray-400">Stick rest-to-full time. 0 = cap only, no ramp.</span>
+                    </div>
+                  </div>
+                )}
+                <div className="mt-2 text-xs text-gray-400 leading-relaxed">
+                  For brownouts and wheelies. A stick slammed from full forward to full reverse stalls all four
+                  drive motors at once — the biggest current spike the robot makes, and the one that resets a
+                  hub or lifts the front wheels. The ramp spreads that over a few loops; the cap trims sustained
+                  draw when pushing against something. Both become constants (<code>DRIVE_MAX_POWER</code>,
+                  <code>DRIVE_RAMP_SEC</code>) near the top of the generated TeleOp, so they can be tuned in the
+                  pit without regenerating. Typical: 0.8 and 150–200 ms.
+                </div>
+              </div>
             </div>
 
             {/* Auxiliary Motor Controls */}
