@@ -7693,6 +7693,14 @@ Make sure your code initializes the IMU with these orientations!
         const rangeSensors = sensors.filter(s => ['color', 'distance'].includes((sensorDatabase[s.type] || {}).type));
         const touchSensors = sensors.filter(s => ['touch', 'limit'].includes((sensorDatabase[s.type] || {}).type));
         const encoderMotors = auxMotors.filter(m => hasEncoder(m));
+        // Options for a picker. Shows why the list is empty, and a "choose" row
+        // whenever the stored value is not in the list — a blank dropdown says
+        // nothing about what went wrong.
+        const opts = (items, value, emptyMsg) => (<>
+          {items.length === 0 && <option value="">{emptyMsg}</option>}
+          {items.length > 0 && !items.some(x => x.name === value) && <option value="">(choose…)</option>}
+          {items.map(x => <option key={x.id ?? x.name} value={x.name}>{x.name}</option>)}
+        </>);
         const updateRule = (id, patch) => setRules(rules.map(r => r.id === id ? { ...r, ...patch } : r));
         const updateCond = (rule, idx, patch) => updateRule(rule.id, { conditions: rule.conditions.map((c, i) => i === idx ? { ...c, ...patch } : c) });
         const newCond = (type) => {
@@ -7751,9 +7759,8 @@ Make sure your code initializes the IMU with these orientations!
               {!hasLimelight && <span className="text-xs text-red-300">Limelight is off (Limelight tab)</span>}
             </>)}
             {c.type === 'color' && (<>
-              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
-                {colorSensors.length === 0 && <option value="">(no colour sensor)</option>}
-                {colorSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              <select className={sel} value={c.sensor || ''} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {opts(colorSensors, c.sensor, '(no colour sensor in the Sensors tab)')}
               </select>
               <select className={sel} value={c.color} onChange={(e) => updateCond(rule, idx, { color: e.target.value, ...(RULE_HUE_PRESET[e.target.value] !== undefined ? { hue: RULE_HUE_PRESET[e.target.value] } : {}) })}>
                 <option value="red">red</option><option value="blue">blue</option><option value="green">green</option>
@@ -7807,9 +7814,8 @@ Make sure your code initializes the IMU with these orientations!
               </>)}
             </>)}
             {c.type === 'distance' && (<>
-              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
-                {rangeSensors.length === 0 && <option value="">(no distance-capable sensor)</option>}
-                {rangeSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              <select className={sel} value={c.sensor || ''} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {opts(rangeSensors, c.sensor, '(no distance-capable sensor in the Sensors tab)')}
               </select>
               <select className={sel} value={c.op} onChange={(e) => updateCond(rule, idx, { op: e.target.value })}>
                 <option value="<">less than</option><option value=">">more than</option>
@@ -7818,9 +7824,8 @@ Make sure your code initializes the IMU with these orientations!
               <span className="text-xs text-gray-400">in</span>
             </>)}
             {c.type === 'velocity' && (<>
-              <select className={sel} value={c.motor} onChange={(e) => updateCond(rule, idx, { motor: e.target.value })}>
-                {encoderMotors.length === 0 && <option value="">(no motor with encoder)</option>}
-                {encoderMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+              <select className={sel} value={c.motor || ''} onChange={(e) => updateCond(rule, idx, { motor: e.target.value })}>
+                {opts(encoderMotors, c.motor, '(no motor with Encoder connected ticked)')}
               </select>
               <select className={sel} value={c.op} onChange={(e) => updateCond(rule, idx, { op: e.target.value })}>
                 <option value="above">above</option><option value="below">below</option>
@@ -7837,9 +7842,8 @@ Make sure your code initializes the IMU with these orientations!
               </select>
             </>)}
             {c.type === 'touch' && (
-              <select className={sel} value={c.sensor} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
-                {touchSensors.length === 0 && <option value="">(no touch/limit sensor)</option>}
-                {touchSensors.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+              <select className={sel} value={c.sensor || ''} onChange={(e) => updateCond(rule, idx, { sensor: e.target.value })}>
+                {opts(touchSensors, c.sensor, '(no touch/limit sensor in the Sensors tab)')}
               </select>
             )}
             {rule.conditions.length > 1 && (
@@ -7870,13 +7874,14 @@ Make sure your code initializes the IMU with these orientations!
               {a.type === 'start_macro' && (<>
                 <select className={sel} value={a.macroId ?? ''} onChange={(e) => upd({ macroId: e.target.value })}>
                   {teleopMacros.length === 0 && <option value="">(no TeleOp macro with steps)</option>}
+                  {teleopMacros.length > 0 && !teleopMacros.some(x => String(x.m.id) === String(a.macroId)) && <option value="">(choose…)</option>}
                   {teleopMacros.map(x => <option key={x.m.id} value={x.m.id}>{x.m.name}</option>)}
                 </select>
                 <span className="text-xs text-gray-400">once per press of the first condition{isElse ? ', when the other conditions are false' : ''}; only if no macro is running</span>
               </>)}
               {(a.type === 'motor_power' || a.type === 'motor_stop') && (
-                <select className={sel} value={a.motor} onChange={(e) => upd({ motor: e.target.value })}>
-                  {auxMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                <select className={sel} value={a.motor || ''} onChange={(e) => upd({ motor: e.target.value })}>
+                  {opts(auxMotors, a.motor, '(no auxiliary motors in the Motors tab)')}
                 </select>
               )}
               {a.type === 'motor_power' && (<>
@@ -7885,22 +7890,21 @@ Make sure your code initializes the IMU with these orientations!
                 <span className="text-xs text-gray-400">(negative = reverse)</span>
               </>)}
               {a.type === 'motor_velocity' && (<>
-                <select className={sel} value={a.motor} onChange={(e) => upd({ motor: e.target.value })}>
-                  {encoderMotors.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+                <select className={sel} value={a.motor || ''} onChange={(e) => upd({ motor: e.target.value })}>
+                  {opts(encoderMotors, a.motor, '(no motor with Encoder connected ticked)')}
                 </select>
                 <input type="number" step="50" className={inp} value={a.velocity} onChange={(e) => upd({ velocity: parseFloat(e.target.value) })} />
                 <span className="text-xs text-gray-400">ticks/s</span>
               </>)}
               {a.type === 'servo_position' && (<>
-                <select className={sel} value={a.servo} onChange={(e) => upd({ servo: e.target.value })}>
-                  {servos.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+                <select className={sel} value={a.servo || ''} onChange={(e) => upd({ servo: e.target.value })}>
+                  {opts(servos, a.servo, '(no servos in the Servos tab)')}
                 </select>
                 <input type="number" step="0.05" min="0" max="1" className={inp} value={a.position} onChange={(e) => upd({ position: parseFloat(e.target.value) })} />
               </>)}
               {a.type === 'led' && (
-                <select className={sel} value={a.pattern} onChange={(e) => upd({ pattern: e.target.value })}>
-                  {!hasBlinkin && <option value="">(no Blinkin configured)</option>}
-                  {blinkinPatterns.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                <select className={sel} value={a.pattern || ''} onChange={(e) => upd({ pattern: e.target.value })}>
+                  {!hasBlinkin ? <option value="">(no Blinkin configured)</option> : opts(blinkinPatterns, a.pattern, '(no patterns in the LEDs tab)')}
                 </select>
               )}
               {(list.length > 1 || isElse) && (
@@ -7916,7 +7920,7 @@ Make sure your code initializes the IMU with these orientations!
           return (<>
             {list.map((_, idx) => actionEditor(rule, key, list, idx))}
             <button onClick={() => setActions(rule, key, [...list, newAction('motor_power')])}
-              className="text-xs text-blue-300 hover:text-blue-200">
+              className="text-xs text-blue-300 hover:text-blue-200 mr-4">
               {list.length === 0 ? (isElse ? '+ ELSE action (when the condition is false)' : '+ action') : (isElse ? '+ and also (ELSE)' : '+ and also')}
             </button>
           </>);
