@@ -2685,6 +2685,11 @@ const FTCRobotConfigurator = () => {
       ' *                 it within 3 s: Y made, X short, B long. A droop with no',
       ' *                 mark is logged as an unmarked shot.',
       ' *',
+      ' * MOTORS IN THIS OPMODE',
+      ` *   Tracked (encoder, run with Y, hold a velocity):  ${enc.map(m => m.name).join(', ')}`,
+      ` *   Feed (no encoder, right / left trigger together):  ${feed.length ? feed.map(m => `${m.name} @ ${feedPower(m)}`).join(', ') : 'none'}`,
+      ' *   Drive motors are not used at all.',
+      ' *',
       ' * CONTROLS',
       ' *   LB / RB            select motor',
       ' *   Y                  toggle the selected motor on / off (outside the 3 s grading window)',
@@ -8699,9 +8704,9 @@ Make sure your code initializes the IMU with these orientations!
           : generateCodeSnippet();
         return (
           <div className="space-y-6">
-            <div className="flex justify-between items-center">
-              <h3 className="text-xl font-bold text-green-400">Generated Code</h3>
-              <div className="flex gap-2">
+            <div className="flex flex-wrap justify-between items-center gap-2">
+              <h3 className="text-xl font-bold text-green-400 whitespace-nowrap">Generated Code</h3>
+              <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => setCodeOutputMode('teleop')}
                   className={`px-3 py-1 rounded text-sm font-medium ${
@@ -8780,13 +8785,23 @@ Make sure your code initializes the IMU with these orientations!
                 Press A to capture a sample (three stay on screen) so two game pieces can be compared. Any rule that reads
                 a sensor shows its live YES/no verdict, using the same helper code the TeleOp runs. Colour gain here and
                 in the TeleOp are both set from the Rules tab so thresholds carry over.</p>
-              ) : codeOutputMode === 'shootertune' ? (
+              ) : codeOutputMode === 'shootertune' ? (<>
                 <p>🎯 <strong>Shooter Tune:</strong> Three modes. <em>CHARACTERIZE</em> runs a motor flat out until it plateaus and
                 reports max ticks/s plus the F/P/I the REV formula suggests. <em>HOLD</em> holds targets and shows error mean and
                 spread. <em>SHOT</em> runs any number of motors, you press A as each ball leaves, and it records velocity at the
                 mark, the dip, and recovery time — then Y/X/B grades it made/short/long. Everything is logged; download the
                 RC log and open it in the Shot Log viewer below.</p>
-              ) : codeOutputMode === 'calibration' ? (
+                {(() => {
+                  const enc = auxMotors.filter(m => hasEncoder(m)), feed = auxMotors.filter(m => !hasEncoder(m));
+                  return (
+                    <div className="mt-2 text-xs text-gray-300 space-y-1">
+                      <div><span className="text-green-300 font-semibold">Tracked</span> (encoder; Y switches each on, A/HOLD/SHOT measure them): {enc.length ? enc.map(m => m.name).join(', ') : <em>none — tick Encoder connected on a shooter</em>}</div>
+                      <div><span className="text-blue-300 font-semibold">Feed</span> (no encoder; right trigger forward, left reverse, all together, at their Controls-tab power): {feed.length ? feed.map(m => `${m.name} @ ${((motorControls || {})[m.name] || {}).power || 0.5}`).join(', ') : <em>none</em>}</div>
+                      <div><span className="text-gray-400 font-semibold">Drive motors</span>: not used.</div>
+                    </div>
+                  );
+                })()}
+              </>) : codeOutputMode === 'calibration' ? (
                 <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets in five tests: port scan, straight push, two-push strafe, spin, verify. Motor names come from this configuration, so there is nothing to hand-edit. The <strong>port scan</strong> shows which ports actually move, so a mis-wired pod is visible instead of silently reading zero; the <strong>two-push strafe</strong> catches a reversed pod by checking that left and right disagree in sign.</p>
               ) : (
                 <p>📋 <strong>Config Snippet:</strong> Just the constants and initialization code. Paste into your own OpMode.</p>
