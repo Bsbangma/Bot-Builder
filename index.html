@@ -1309,6 +1309,16 @@ const FTCRobotConfigurator = () => {
       }
     }
 
+    // A no-wait step at the very end of a PathPilot macro has nothing after it
+    // to cover the travel / spin-up. It still works, but the person should know.
+    (macros || []).forEach(m => {
+      if (!(m.pathpilotEnabled || m.triggerType === 'pathpilot')) return;
+      const last = (m.steps || [])[(m.steps || []).length - 1];
+      if (last && last.noWait && (last.type === 'servo_position' || last.type === 'motor_until_velocity')) {
+        warnings.push({ type: 'warning', message: `Macro "${m.name}" ends with a no-wait ${last.type === 'servo_position' ? 'servo' : 'velocity'} step. Nothing follows it to cover the ${last.type === 'servo_position' ? 'travel' : 'spin-up'}, so in auto the next leg starts (or the period ends) before it finishes. Fine if that is intended.` });
+      }
+    });
+
     // Rules. A rule that cannot be generated is skipped with a comment in the
     // code; say so here too, where it is easier to see.
     (rules || []).forEach((r, i) => {
@@ -1810,6 +1820,15 @@ const FTCRobotConfigurator = () => {
           const tgt = Number(st.targetVelocity) || 0;
           const tol = Number(st.velocityTolerance) || 100;
           usedMotors.add(v);
+          if (st.noWait) {
+            // Set and go: the wheel comes up to speed while whatever follows —
+            // usually a drive leg — is happening. A later motor_until_velocity
+            // on the same motor (with wait) is the safety net before feeding.
+            body.push(`// set velocity ${tgt} ticks/sec and continue without waiting for it`);
+            body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+            body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
+            break;
+          }
           body.push(`// closed-loop: hold ${tgt} ticks/sec, proceed once within ${tol}`);
           body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
           body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
@@ -1831,8 +1850,15 @@ const FTCRobotConfigurator = () => {
         case 'servo_position':
           usedServos.add(javaVarName(st.servoName));
           body.push(`${javaVarName(st.servoName)}.setPosition(${st.servoPosition !== undefined ? st.servoPosition : 0.5});`);
-          body.push('sleep((long)(SERVO_SETTLE * 1000));');
-          estSeconds += 0.30;
+          if (st.noWait) {
+            // setPosition returns at once; the servo travels on its own. Only
+            // the settle sleep costs time, so skipping it is free when a longer
+            // step follows.
+            body.push('// no settle wait: the servo travels during whatever comes next');
+          } else {
+            body.push('sleep((long)(SERVO_SETTLE * 1000));');
+            estSeconds += 0.30;
+          }
           break;
         case 'wait':
           body.push(`sleep(${Math.round((st.duration !== undefined ? st.duration : 1.0) * 1000)});`);
@@ -4329,6 +4355,16 @@ ${isHold ?
         const v = javaVarName(step.motorName);
         const tgt = Number(step.targetVelocity) || 0;
         const tol = Number(step.velocityTolerance) || 100;
+        if (step.noWait) {
+          macroCode += `                        // Set the velocity and move on at once; the wheel spins up while
+                        // the following steps run. The motor keeps holding it afterwards.
+                        ${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                        ${v}.setVelocity(${tgt.toFixed(1)});
+                        macroStep++;
+                        break;
+`;
+          break;
+        }
         macroCode += `                        // Spin up under closed-loop velocity control and hold there.
                         // The PID regulates against the encoder, so the speed reached is
                         // the one asked for regardless of battery voltage — unlike setPower,
@@ -7753,6 +7789,17 @@ Make sure your code initializes the IMU with these orientations!
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
                   </div>
+                  <div className="col-span-4 flex flex-wrap items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                      <input type="checkbox" checked={!step.noWait} onChange={(e) => updateStep(macro.id, step.id, 'noWait', !e.target.checked)} />
+                      Wait until at speed before the next step
+                    </label>
+                    <span className="text-gray-500">
+                      {step.noWait
+                        ? 'Set and go: the wheel spins up during the steps (or drive leg) that follow. Put a waiting Motor Until Velocity on the same motor before you feed, as the safety net. Costs 0 s in PathPilot.'
+                        : 'Untick to start the shooter and keep going — e.g. in a macro PathPilot runs at departure so the wheel is at speed on arrival.'}
+                    </span>
+                  </div>
                   <div className="col-span-4 text-xs text-gray-400">
                     Holds the motor at the target under closed-loop control and moves on once it
                     gets there (or the timeout passes). The motor keeps running afterwards — use
@@ -7829,6 +7876,17 @@ Make sure your code initializes the IMU with these orientations!
                       onChange={(e) => updateStep(macro.id, step.id, 'servoPosition', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                  </div>
+                  <div className="col-span-2 flex flex-wrap items-center gap-2 text-xs">
+                    <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                      <input type="checkbox" checked={!step.noWait} onChange={(e) => updateStep(macro.id, step.id, 'noWait', !e.target.checked)} />
+                      Wait for the servo to settle (PathPilot only, 0.3 s)
+                    </label>
+                    <span className="text-gray-500">
+                      {step.noWait
+                        ? 'No settle wait: the servo travels during whatever comes next. Free when a longer step or a drive leg follows; as the last thing in auto it may not finish before the period ends.'
+                        : 'TeleOp macros never wait on servos. In PathPilot this adds a 0.3 s settle so the servo is in place before the next step.'}
+                    </span>
                   </div>
                 </div>
               );
