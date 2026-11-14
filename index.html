@@ -7309,6 +7309,28 @@ Make sure your code initializes the IMU with these orientations!
           if (editingMacroId === macroId) setEditingMacroId(null);
         };
 
+        // Deep copy with fresh ids, named "<name>-copy" (then -copy2, -copy3 …
+        // if that exists). Trigger comes along too, so a button-triggered copy
+        // shows a collision error until it is given its own button — that is
+        // the reminder, not a bug.
+        const duplicateMacro = (macroId) => {
+          const src = macros.find(m => m.id === macroId);
+          if (!src) return;
+          const newId = macros.length > 0 ? Math.max(...macros.map(m => m.id)) + 1 : 1;
+          const taken = new Set(macros.map(m => m.name));
+          let name = `${src.name}-copy`, n = 2;
+          while (taken.has(name)) name = `${src.name}-copy${n++}`;
+          const copy = JSON.parse(JSON.stringify(src));
+          copy.id = newId;
+          copy.name = name;
+          copy.steps = (copy.steps || []).map((st, i) => ({ ...st, id: i + 1 }));
+          const idx = macros.findIndex(m => m.id === macroId);
+          const next = [...macros];
+          next.splice(idx + 1, 0, copy);
+          setMacros(next);
+          setEditingMacroId(newId);
+        };
+
         const addStep = (macroId) => {
           const macro = macros.find(m => m.id === macroId);
           if (!macro) return;
@@ -7889,8 +7911,15 @@ Make sure your code initializes the IMU with these orientations!
                                 : `${macro.behavior === 'hold' ? 'Hold' : 'Press'} ${triggerButtonOptions.find(b => b.value === macro.triggerButton)?.label}`})
                         </span>
                       </div>
-                      <div className="flex gap-2">
+                      <div className="flex gap-3">
                         <span className="text-gray-400 text-sm">{macro.steps.length} steps</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); duplicateMacro(macro.id); }}
+                          className="text-blue-300 hover:text-blue-200 text-sm"
+                          title="Make a copy of this macro, named with -copy, and open it"
+                        >
+                          Duplicate
+                        </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); deleteMacro(macro.id); }}
                           className="text-red-400 hover:text-red-300 text-sm"
@@ -8824,7 +8853,7 @@ Make sure your code initializes the IMU with these orientations!
               <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
                 <h4 className="text-blue-400 font-semibold mb-2">🔧 Checking motor directions:</h4>
                 <ol className="text-blue-200 space-y-1 list-decimal list-inside">
-                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'MotorTest')}.java</code> and Build</li>
+                  <li>Paste into OnBot Java as <CopyName text={`${javaClassName(robotName, 'MotorTest')}.java`} className="bg-blue-800 px-1 rounded" /> and Build</li>
                   <li>Put the robot on blocks so the wheels spin free</li>
                   <li>D-pad left/right to pick a motor — its name, hub and port show in telemetry</li>
                   <li>Hold the right bumper and watch which way that wheel turns</li>
@@ -8837,7 +8866,7 @@ Make sure your code initializes the IMU with these orientations!
               <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
                 <h4 className="text-blue-400 font-semibold mb-2">🔍 Setting colour thresholds:</h4>
                 <ol className="text-blue-200 space-y-1 list-decimal list-inside">
-                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'SensorTest')}.java</code> and Build</li>
+                  <li>Paste into OnBot Java as <CopyName text={`${javaClassName(robotName, 'SensorTest')}.java`} className="bg-blue-800 px-1 rounded" /> and Build</li>
                   <li>Run it with the robot where it will play — lighting matters</li>
                   <li>Hold a game piece where the sensor will see it in a match; press <strong>A</strong>. Repeat for each colour and once with nothing there</li>
                   <li>Read the <strong>hue</strong> of each sample. In the Rules tab pick the colour preset if the hue is within ~20° of it, otherwise choose <em>custom</em> and type the hue; set the tolerance to about half the gap between the two closest colours</li>
@@ -8851,7 +8880,7 @@ Make sure your code initializes the IMU with these orientations!
               <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
                 <h4 className="text-blue-400 font-semibold mb-2">🎯 Tuning order:</h4>
                 <ol className="text-blue-200 space-y-1 list-decimal list-inside">
-                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'ShooterTune')}.java</code>, Build, run with a charged battery</li>
+                  <li>Paste into OnBot Java as <CopyName text={`${javaClassName(robotName, 'ShooterTune')}.java`} className="bg-blue-800 px-1 rounded" />, Build, run with a charged battery</li>
                   <li><strong>CHARACTERIZE</strong> each shooter (LB/RB to pick, A to run). Note max ticks/s and the current hub PIDF shown at init. If max is within ~15% of your target, the loop has no headroom — fix gearing before tuning anything</li>
                   <li>Type max ticks/s into the Motors tab; tick <em>Custom PIDF</em> to take the suggested F/P/I. Regenerate, or edit live with X + D-pad</li>
                   <li><strong>HOLD</strong>: Y turns a motor on. Error spread should shrink after F is right; raise P until it hunts, then back off</li>
@@ -9016,7 +9045,7 @@ Make sure your code initializes the IMU with these orientations!
               <div className="bg-green-900 border border-green-600 p-3 rounded-lg text-sm">
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
                 <ol className="text-green-200 space-y-1 list-decimal list-inside">
-                  <li>Paste into OnBot Java as <code className="bg-green-800 px-1 rounded">{javaClassName(robotName, 'OdometryCalibration')}.java</code> and Build</li>
+                  <li>Paste into OnBot Java as <CopyName text={`${javaClassName(robotName, 'OdometryCalibration')}.java`} className="bg-green-800 px-1 rounded" /> and Build</li>
                   <li>Run it. <strong>D-pad Down</strong> moves to the next test, <strong>D-pad Up</strong> goes back, <strong>A</strong> re-zeros the current test, <strong>B</strong> records a reading</li>
                   <li><strong>Test 1 — Port scan:</strong> push the robot and confirm the two ports that move are the ones named as your pods</li>
                   <li><strong>Test 2 — Straight:</strong> push forward exactly 48" (two tiles), press B</li>
@@ -9033,7 +9062,7 @@ Make sure your code initializes the IMU with these orientations!
                 <h4 className="text-blue-400 font-semibold mb-2">📝 Next Steps:</h4>
                 <ol className="text-blue-200 space-y-1 list-decimal list-inside">
                   <li>Copy the code above</li>
-                  <li>In OnBot Java, create a new file: <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'TeleOp')}.java</code></li>
+                  <li>In OnBot Java, create a new file: <CopyName text={`${javaClassName(robotName, 'TeleOp')}.java`} className="bg-blue-800 px-1 rounded" /></li>
                   <li>Paste and save</li>
                   <li>Configure your Driver Station (see DS tab)</li>
                   <li>Test and drive!</li>
@@ -10027,6 +10056,28 @@ Make sure your code initializes the IMU with these orientations!
   );
 };
 
+
+// A file/class name with a one-click copy beside it. Saves selecting the
+// text by hand and missing a character. Shows "Copied" for a moment.
+const CopyName = ({ text, className }) => {
+  const [copied, setCopied] = React.useState(false);
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1500); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, done);
+      else { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); done(); }
+    } catch (e) { done(); }
+  };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <code className={className || 'bg-gray-800 px-1 rounded'}>{text}</code>
+      <button type="button" onClick={copy} title={`Copy "${text}"`}
+        className={`text-xs px-1.5 py-0.5 rounded border ${copied ? 'bg-green-700 border-green-500 text-white' : 'bg-gray-700 border-gray-500 text-gray-200 hover:bg-gray-600'}`}>
+        {copied ? 'Copied' : 'copy'}
+      </button>
+    </span>
+  );
+};
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<FTCRobotConfigurator />);
