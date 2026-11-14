@@ -274,6 +274,12 @@ const FTCRobotConfigurator = () => {
   // Colour-sensor gain, shared by the Sensor Test and any TeleOp that has
   // colour rules, so thresholds read off one apply to the other.
   const [colorSensorGain, setColorSensorGain] = React.useState(8);
+  // Shot Log viewer (Code tab → Shooter Tune): parsed runs from a downloaded
+  // RC log. Session-only; not saved with the config.
+  const [shotLogRuns, setShotLogRuns] = React.useState([]);
+  const [shotLogRun, setShotLogRun] = React.useState(0);
+  const [shotLogMotor, setShotLogMotor] = React.useState(-1);
+  const [shotLogName, setShotLogName] = React.useState('');
   const [editingMacroId, setEditingMacroId] = React.useState(null);
   const [defaultTolerance, setDefaultTolerance] = React.useState(1.0); // inches
 
@@ -432,6 +438,20 @@ const FTCRobotConfigurator = () => {
    * which is what the per-motor flag records. Missing means true — every config
    * saved before the flag existed was generated as if encoders were present.
    */
+  // Custom velocity-loop coefficients for a motor, as the one Java line that
+  // applies them, or null when the motor runs the SDK defaults. Must come AFTER
+  // setMode: changing the mode resets the coefficients to that mode's defaults.
+  const motorPIDF = (m) => {
+    const c = m && m.velocityPIDF;
+    if (!c || !hasEncoder(m)) return null;
+    const n = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+    const out = { p: n(c.p), i: n(c.i), d: n(c.d), f: n(c.f) };
+    return (out.p || out.i || out.d || out.f) ? out : null;
+  };
+  const pidfJava = (m) => {
+    const c = motorPIDF(m);
+    return c ? `${javaVarName(m.name)}.setVelocityPIDFCoefficients(${c.p}, ${c.i}, ${c.d}, ${c.f});   // after setMode, which resets them` : null;
+  };
   const hasEncoder = (m) => {
     if (!m) return false;
     const s = motorSpecs(m) || {};
@@ -2045,7 +2065,13 @@ const FTCRobotConfigurator = () => {
         // PathPilot's autonomous init must pick the same run mode TeleOp does,
         // or a motor that behaves in TeleOp surges in auto.
         hasEncoder: hasEncoder(mm),
-        runMode: hasEncoder(mm) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'
+        runMode: hasEncoder(mm) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER',
+        // Velocity loop. maxTicksPerSec is measured by Shooter Tune (0 = not
+        // measured); velocityPIDF is present only when custom coefficients are
+        // set, and applies in auto as well as TeleOp — hence no teleop prefix.
+        // PathPilot must call setVelocityPIDFCoefficients AFTER setMode.
+        ...(hasEncoder(mm) ? { maxTicksPerSec: Number(mm.maxTicksPerSec) || 0 } : {}),
+        ...(motorPIDF(mm) ? { velocityPIDF: motorPIDF(mm) } : {})
       })),
       servos: (servos || []).map(sv => ({ hardwareName: sv.name, port: sv.port })),
       // Sensors, so PathPilot can declare and init the ones rules read.
@@ -2584,6 +2610,444 @@ const FTCRobotConfigurator = () => {
     if (condModes.has('rgb')) P('', ...RULE_SEES_RGB_JAVA);
     P('}');
     return L.join('\n');
+  };
+
+  // ------------------------------------------------------------------
+  // ShooterTune.java — characterise, hold and shot-test every encoder motor.
+  //
+  // CHARACTERIZE  full power until the velocity plateaus; reports max ticks/s
+  //               and the F / P / I the REV formula suggests from it.
+  // HOLD          setVelocity(target) with error mean and spread over a
+  //               rolling window, because one twitching number cannot tell
+  //               you whether a coefficient change helped.
+  // SHOT          any number of motors running; press A as a ball leaves and
+  //               the OpMode records velocity at the mark, the dip over the
+  //               next half second, and how long it took to recover — then
+  //               grade the shot (made / short / long). A droop with no mark
+  //               is logged as an unmarked shot so a missed press loses
+  //               nothing. Everything goes to RobotLog under one tag; the
+  //               Shot Log viewer in BotBuilder reads it back and plots it.
+  // ------------------------------------------------------------------
+  const SHOT_LOG_TAG = 'BBTune';
+  const generateShooterTune = () => {
+    const enc = (auxMotors || []).filter(m => hasEncoder(m));
+    const feed = (auxMotors || []).filter(m => !hasEncoder(m));
+    if (!enc.length) {
+      return '// No auxiliary motor has "Encoder connected" ticked. Shooter Tune needs\n'
+           + '// a velocity reading, so tick it on the shooter(s) in the Motors tab.';
+    }
+    const className = javaClassName(robotName, 'ShooterTune');
+    const defaultTarget = (m) => {
+      const mc = (motorControls || {})[m.name] || {};
+      return Number(mc.velocity) > 0 ? Number(mc.velocity) : 1000;
+    };
+    const defaultTol = (m) => {
+      const mc = (motorControls || {})[m.name] || {};
+      return Number(mc.velocityTolerance) > 0 ? Number(mc.velocityTolerance) : 50;
+    };
+    const feedPower = (m) => {
+      const mc = (motorControls || {})[m.name] || {};
+      return Number(mc.power) > 0 ? Number(mc.power) : 0.5;
+    };
+    const L = [];
+    const P = (...xs) => xs.forEach(x => L.push(x));
+    P('package org.firstinspires.ftc.teamcode;',
+      '',
+      'import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;',
+      'import com.qualcomm.robotcore.eventloop.opmode.TeleOp;',
+      'import com.qualcomm.robotcore.hardware.DcMotor;',
+      'import com.qualcomm.robotcore.hardware.DcMotorEx;',
+      'import com.qualcomm.robotcore.hardware.DcMotorSimple;',
+      'import com.qualcomm.robotcore.hardware.PIDFCoefficients;',
+      'import com.qualcomm.robotcore.util.ElapsedTime;',
+      'import com.qualcomm.robotcore.util.RobotLog;',
+      'import java.util.ArrayList;',
+      'import java.util.Locale;',
+      '',
+      '/**',
+      ` * ${className} — generated by BotBuilder from the "${javaString(robotName)}" configuration.`,
+      ' *',
+      ' * Finds out what the shooter velocity loop is actually doing, so the PIDF',
+      ' * numbers in BotBuilder\'s Motors tab come from measurement, not guesswork.',
+      ' *',
+      ' * MODES (D-pad left / right)',
+      ' *   CHARACTERIZE  A runs the selected motor at full power until its velocity',
+      ' *                 plateaus, then reports max ticks/s and the coefficients the',
+      ' *                 REV formula suggests: F = 32767 / max, P = 0.1 F, I = 0.01 F.',
+      ' *                 Type max ticks/s into the Motors tab.',
+      ' *   HOLD          Running motors hold their targets. Shows error mean and',
+      ' *                 spread over the last 50 loops — compare these before and',
+      ' *                 after a coefficient change.',
+      ' *   SHOT          Same as HOLD, plus: press A as a ball leaves. Each running',
+      ' *                 motor records its velocity at that instant, the lowest',
+      ' *                 velocity in the next 500 ms (the dip the ball caused) and',
+      ' *                 how long it took to get back inside tolerance. Then grade',
+      ' *                 it within 3 s: Y made, X short, B long. A droop with no',
+      ' *                 mark is logged as an unmarked shot.',
+      ' *',
+      ' * CONTROLS',
+      ' *   LB / RB            select motor',
+      ' *   Y                  toggle the selected motor on / off (outside the 3 s grading window)',
+      ' *   X                  cycle which value D-pad edits: target, P, I, D, F (outside grading)',
+      ' *   D-pad up / down    edit that value (target ±25, P ±0.1, I ±0.01, D ±0.01, F ±0.5)',
+      ' *   A                  CHARACTERIZE: run it.  SHOT: mark a shot.',
+      ' *   Right / left trigger   run the feed motor(s) forward / reverse',
+      ' *   Back               clear the shot table',
+      ' *',
+      ' * Battery voltage is on screen at all times — a sagging pack looks exactly',
+      ' * like a bad F.',
+      ' *',
+      ' * LOG: every loop writes one velocity row per running motor, and every shot',
+      ' * one summary row, to RobotLog under the tag "' + SHOT_LOG_TAG + '". Download the',
+      ' * Robot Controller log from the Manage page and open it in BotBuilder\'s',
+      ' * Shot Log viewer (Code tab → Shooter Tune).',
+      ' */',
+      `@TeleOp(name = "${javaString(className)}", group = "BotBuilder")`,
+      `public class ${className} extends LinearOpMode {`,
+      '',
+      `    private static final String[] NAMES = { ${enc.map(m => `"${javaString(m.name)}"`).join(', ')} };`,
+      `    private static final double[] DEFAULT_TARGET = { ${enc.map(defaultTarget).join(', ')} };`,
+      `    private static final double[] TOLERANCE = { ${enc.map(defaultTol).join(', ')} };`,
+      `    private static final String[] FEED_NAMES = { ${feed.map(m => `"${javaString(m.name)}"`).join(', ')} };`,
+      `    private static final double[] FEED_POWER = { ${feed.map(feedPower).join(', ')} };`,
+      '    private static final String LOG_TAG = "' + SHOT_LOG_TAG + '";',
+      '    private static final int LOG_MAX_ROWS = 30000;',
+      '    private static final double DIP_WINDOW_S = 0.5;     // how long after the mark to look for the dip',
+      '    private static final double GRADE_WINDOW_S = 3.0;   // how long after the mark Y/X/B grade it',
+      '    private static final double RECOVER_HOLD_S = 0.1;   // inside tolerance this long = recovered',
+      '    private static final double SETTLED_S = 0.3;        // inside tolerance this long arms droop detection',
+      '    private static final String[] MODES = { "CHARACTERIZE", "HOLD", "SHOT" };',
+      '    private static final String[] FIELDS = { "target", "P", "I", "D", "F" };',
+      '    private static final double[] STEPS = { 25, 0.1, 0.01, 0.01, 0.5 };',
+      '',
+      '    private DcMotorEx[] motors = new DcMotorEx[NAMES.length];',
+      '    private DcMotorEx[] feeds = new DcMotorEx[FEED_NAMES.length];',
+      '    private double[] target = new double[NAMES.length];',
+      '    private boolean[] running = new boolean[NAMES.length];',
+      '    private double[][] pidf = new double[NAMES.length][4];',
+      '    private double[] maxTicks = new double[NAMES.length];',
+      '    private int selected = 0, mode = 1, field = 0;',
+      '',
+      '    // Rolling error window for HOLD.',
+      '    private double[][] errWin = new double[NAMES.length][50];',
+      '    private int[] errIdx = new int[NAMES.length];',
+      '    private int[] errCount = new int[NAMES.length];',
+      '',
+      '    // Per-motor shot tracking.',
+      '    private boolean[] inShot = new boolean[NAMES.length];',
+      '    private double[] shotStart = new double[NAMES.length];',
+      '    private double[] vAtMark = new double[NAMES.length];',
+      '    private double[] dipMin = new double[NAMES.length];',
+      '    private double[] recoverAt = new double[NAMES.length];     // <0 until recovered',
+      '    private double[] insideSince = new double[NAMES.length];   // <0 when outside tolerance',
+      '    private boolean[] shotMarked = new boolean[NAMES.length];',
+      '    private int[] shotId = new int[NAMES.length];',
+      '    private int nextShotId = 1;',
+      '',
+      '    // Grading applies to the most recent mark, whichever motors it covered.',
+      '    private int gradeShotId = 0;',
+      '    private double gradeUntil = -1;',
+      '    private String grade = "?";',
+      '',
+      '    private static class Shot {',
+      '        int id; String motor; double vAtMark, dip, recoverMs, batt, target; String grade; boolean marked;',
+      '    }',
+      '    private final ArrayList<Shot> shots = new ArrayList<>();',
+      '',
+      '    private boolean prevLB, prevRB, prevY, prevX, prevA, prevB, prevUp, prevDown, prevLeft, prevRight, prevBack;',
+      '    private final ElapsedTime clock = new ElapsedTime();',
+      '    private final ElapsedTime loopTimer = new ElapsedTime();',
+      '    private StringBuilder logBuffer = new StringBuilder(400000);',
+      '    private String runId;',
+      '    private int logRows = 0;',
+      '',
+      '    @Override',
+      '    public void runOpMode() {',
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            motors[i] = hardwareMap.get(DcMotorEx.class, NAMES[i]);',
+      '        }');
+    enc.forEach((m, i) => {
+      P(`        motors[${i}].setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`,
+        `        motors[${i}].setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});`,
+        `        motors[${i}].setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+      const c = motorPIDF(m);
+      if (c) P(`        motors[${i}].setVelocityPIDFCoefficients(${c.p}, ${c.i}, ${c.d}, ${c.f});   // from the Motors tab; after setMode`);
+    });
+    P('        for (int i = 0; i < NAMES.length; i++) {',
+      '            target[i] = DEFAULT_TARGET[i];',
+      '            // Record what the hub is actually using before anything is changed.',
+      '            PIDFCoefficients c = motors[i].getPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER);',
+      '            pidf[i][0] = c.p; pidf[i][1] = c.i; pidf[i][2] = c.d; pidf[i][3] = c.f;',
+      '            insideSince[i] = -1; recoverAt[i] = -1;',
+      '        }',
+      '        for (int i = 0; i < FEED_NAMES.length; i++) {',
+      '            feeds[i] = hardwareMap.get(DcMotorEx.class, FEED_NAMES[i]);',
+      '            feeds[i].setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);',
+      '        }');
+    feed.forEach((m, i) => P(`        feeds[${i}].setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});`));
+    P('',
+      '        runId = Long.toString(System.currentTimeMillis());',
+      '        log("BEGIN," + runId);',
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            log(String.format(Locale.US, "MOTOR,%d,%s,%.1f,%.4f,%.4f,%.4f,%.4f", i, NAMES[i], TOLERANCE[i], pidf[i][0], pidf[i][1], pidf[i][2], pidf[i][3]));',
+      '        }',
+      '        log("COLS_T,t,motor,velocity,target,running");',
+      '        log("COLS_S,id,t,motor,vAtMark,dip,recoverMs,batt,target,grade,marked");',
+      '',
+      `        telemetry.addLine("${javaString(className)} ready");`,
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            telemetry.addData(NAMES[i], "hub PIDF now P %.3f I %.3f D %.3f F %.3f", pidf[i][0], pidf[i][1], pidf[i][2], pidf[i][3]);',
+      '        }',
+      '        telemetry.addLine("LB/RB motor · Y run · X field · dpad edit · A act · Back clear");',
+      '        telemetry.update();',
+      '        waitForStart();',
+      '        clock.reset();',
+      '',
+      '        while (opModeIsActive()) {',
+      '            double now = clock.seconds();',
+      '            double batt = hardwareMap.voltageSensor.iterator().next().getVoltage();',
+      '            boolean grading = now < gradeUntil;',
+      '',
+      '            // --- buttons ---',
+      '            boolean lb = gamepad1.left_bumper, rb = gamepad1.right_bumper;',
+      '            boolean y = gamepad1.y, x = gamepad1.x, a = gamepad1.a, b = gamepad1.b;',
+      '            boolean up = gamepad1.dpad_up, down = gamepad1.dpad_down, left = gamepad1.dpad_left, right = gamepad1.dpad_right;',
+      '            boolean back = gamepad1.back;',
+      '            if (lb && !prevLB) selected = (selected + NAMES.length - 1) % NAMES.length;',
+      '            if (rb && !prevRB) selected = (selected + 1) % NAMES.length;',
+      '            if (left && !prevLeft)   mode = (mode + MODES.length - 1) % MODES.length;',
+      '            if (right && !prevRight) mode = (mode + 1) % MODES.length;',
+      '            if (!grading) {',
+      '                if (y && !prevY) {',
+      '                    running[selected] = !running[selected];',
+      '                    if (!running[selected]) { motors[selected].setVelocity(0); inShot[selected] = false; insideSince[selected] = -1; }',
+      '                }',
+      '                if (x && !prevX) field = (field + 1) % FIELDS.length;',
+      '            }',
+      '            if ((up && !prevUp) || (down && !prevDown)) {',
+      '                double d = (up ? 1 : -1) * STEPS[field];',
+      '                if (field == 0) target[selected] = Math.max(0, target[selected] + d);',
+      '                else {',
+      '                    pidf[selected][field - 1] = Math.max(0, pidf[selected][field - 1] + d);',
+      '                    motors[selected].setVelocityPIDFCoefficients(pidf[selected][0], pidf[selected][1], pidf[selected][2], pidf[selected][3]);',
+      '                    log(String.format(Locale.US, "PIDF,%.3f,%d,%.4f,%.4f,%.4f,%.4f", now, selected, pidf[selected][0], pidf[selected][1], pidf[selected][2], pidf[selected][3]));',
+      '                }',
+      '            }',
+      '            if (back && !prevBack) shots.clear();',
+      '',
+      '            // --- grading the last mark ---',
+      '            if (grading) {',
+      '                if (y && !prevY) grade = "made";',
+      '                if (x && !prevX) grade = "short";',
+      '                if (b && !prevB) grade = "long";',
+      '            }',
+      '',
+      '            // --- modes ---',
+      '            if (mode == 0 && a && !prevA) characterize(selected);',
+      '            if (mode == 2 && a && !prevA) markShot(now, batt, true);',
+      '',
+      '            // --- feed motors ---',
+      '            double feedCmd = gamepad1.right_trigger - gamepad1.left_trigger;',
+      '            for (int i = 0; i < feeds.length; i++) feeds[i].setPower(feedCmd * FEED_POWER[i]);',
+      '',
+      '            // --- drive the loops, track error, detect dips ---',
+      '            for (int i = 0; i < NAMES.length; i++) {',
+      '                if (!running[i]) continue;',
+      '                motors[i].setVelocity(target[i]);',
+      '                double v = motors[i].getVelocity();',
+      '                double err = v - target[i];',
+      '                errWin[i][errIdx[i]] = err; errIdx[i] = (errIdx[i] + 1) % errWin[i].length;',
+      '                if (errCount[i] < errWin[i].length) errCount[i]++;',
+      '                boolean inside = Math.abs(err) <= TOLERANCE[i];',
+      '                boolean wasSettled = insideSince[i] >= 0 && now - insideSince[i] >= SETTLED_S;',
+      '                if (inside) { if (insideSince[i] < 0) insideSince[i] = now; } else insideSince[i] = -1;',
+      '                log(String.format(Locale.US, "T,%.3f,%d,%.1f,%.1f,1", now, i, v, target[i]));',
+      '',
+      '                if (inShot[i]) {',
+      '                    if (now - shotStart[i] <= DIP_WINDOW_S && v < dipMin[i]) dipMin[i] = v;',
+      '                    // Recovered: back inside tolerance and stayed there briefly, after the dip window began.',
+      '                    if (recoverAt[i] < 0 && now - shotStart[i] > 0.05 && insideSince[i] >= 0 && now - insideSince[i] >= RECOVER_HOLD_S) {',
+      '                        recoverAt[i] = insideSince[i];',
+      '                    }',
+      '                    boolean done = recoverAt[i] >= 0 && now - shotStart[i] >= DIP_WINDOW_S && now >= gradeUntil;',
+      '                    if (done || now - shotStart[i] > 6.0) finishShot(i, batt);',
+      '                } else if (mode == 2 && wasSettled && err < -2 * TOLERANCE[i]) {',
+      '                    // A droop the driver did not mark. Log it so the data is not lost.',
+      '                    beginShot(i, now, v, false, nextShotId++);',
+      '                }',
+      '            }',
+      '',
+      '            // --- telemetry ---',
+      '            telemetry.addData("Mode", "%s   (dpad L/R)   Batt %.1fV", MODES[mode], batt);',
+      '            telemetry.addData("Edit", "%s  (X cycles, dpad up/down)", FIELDS[field]);',
+      '            for (int i = 0; i < NAMES.length; i++) {',
+      '                double v = motors[i].getVelocity();',
+      '                telemetry.addData((i == selected ? "> " : "  ") + NAMES[i],',
+      '                    "%s  %.0f / %.0f  err %.0f  P%.2f I%.3f D%.3f F%.2f%s",',
+      '                    running[i] ? "ON " : "off", v, target[i], v - target[i],',
+      '                    pidf[i][0], pidf[i][1], pidf[i][2], pidf[i][3],',
+      '                    maxTicks[i] > 0 ? String.format(Locale.US, "  max %.0f", maxTicks[i]) : "");',
+      '                if (mode == 1 && running[i] && errCount[i] > 1) {',
+      '                    double mean = 0, sq = 0;',
+      '                    for (int k = 0; k < errCount[i]; k++) mean += errWin[i][k];',
+      '                    mean /= errCount[i];',
+      '                    for (int k = 0; k < errCount[i]; k++) sq += (errWin[i][k] - mean) * (errWin[i][k] - mean);',
+      '                    telemetry.addData("   hold", "err mean %.1f  spread ±%.1f over %d loops", mean, Math.sqrt(sq / errCount[i]), errCount[i]);',
+      '                }',
+      '            }',
+      '            if (mode == 0) telemetry.addLine("A: run selected motor at full power until it plateaus");',
+      '            if (mode == 2) {',
+      '                telemetry.addLine(grading',
+      '                    ? String.format(Locale.US, "Shot %d: grade it  Y made  X short  B long   (%.1fs)  [%s]", gradeShotId, gradeUntil - now, grade)',
+      '                    : "A: mark a shot as the ball leaves");',
+      '                int from = Math.max(0, shots.size() - 6);',
+      '                for (int k = shots.size() - 1; k >= from; k--) {',
+      '                    Shot s = shots.get(k);',
+      '                    telemetry.addData("#" + s.id + (s.marked ? "" : "*"), "%s v%.0f dip-%.0f rec %.0fms %s", s.motor, s.vAtMark, s.vAtMark - s.dip, s.recoverMs, s.grade);',
+      '                }',
+      '                summary();',
+      '            }',
+      '            telemetry.addData("Loop", "%dms", (int) loopTimer.milliseconds());',
+      '            loopTimer.reset();',
+      '            telemetry.update();',
+      '',
+      '            prevLB = lb; prevRB = rb; prevY = y; prevX = x; prevA = a; prevB = b;',
+      '            prevUp = up; prevDown = down; prevLeft = left; prevRight = right; prevBack = back;',
+      '        }',
+      '        for (DcMotorEx m : motors) m.setVelocity(0);',
+      '        for (DcMotorEx f : feeds) f.setPower(0);',
+      '        flushLog();',
+      '    }',
+      '',
+      '    /** Full power until the velocity stops climbing; reports max ticks/s and suggested PIDF. */',
+      '    private void characterize(int i) {',
+      '        motors[i].setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);   // true max, not the loop\'s idea of 100%',
+      '        motors[i].setPower(1.0);',
+      '        ElapsedTime t = new ElapsedTime();',
+      '        double last = 0, peak = 0, lastChangeAt = 0;',
+      '        while (opModeIsActive() && t.seconds() < 5.0) {',
+      '            double v = Math.abs(motors[i].getVelocity());',
+      '            if (v > peak) peak = v;',
+      '            if (Math.abs(v - last) > 0.01 * Math.max(v, 1)) lastChangeAt = t.seconds();',
+      '            last = v;',
+      '            telemetry.addData("CHARACTERIZE", "%s  %.0f ticks/s  (%.1fs)", NAMES[i], v, t.seconds());',
+      '            telemetry.update();',
+      '            if (t.seconds() > 1.0 && t.seconds() - lastChangeAt > 0.5) break;   // plateau: <1% change for half a second',
+      '            sleep(20);',
+      '        }',
+      '        motors[i].setPower(0);',
+      '        maxTicks[i] = peak;',
+      '        // Back to velocity mode. setMode resets the coefficients, so re-apply the live ones.',
+      '        motors[i].setMode(DcMotor.RunMode.RUN_USING_ENCODER);',
+      '        motors[i].setVelocityPIDFCoefficients(pidf[i][0], pidf[i][1], pidf[i][2], pidf[i][3]);',
+      '        double f = peak > 0 ? 32767.0 / peak : 0;',
+      '        log(String.format(Locale.US, "CHAR,%d,%.1f,%.4f,%.4f,%.4f", i, peak, f, 0.1 * f, 0.01 * f));',
+      '        telemetry.addData("RESULT " + NAMES[i], "max %.0f ticks/s  ->  F %.3f  P %.3f  I %.4f  D 0", peak, f, 0.1 * f, 0.01 * f);',
+      '        telemetry.addLine("Type max ticks/s into the Motors tab; target should sit well below it.");',
+      '        telemetry.update();',
+      '        sleep(2500);',
+      '    }',
+      '',
+      '    private void markShot(double now, double batt, boolean marked) {',
+      '        int id = nextShotId++;',
+      '        boolean any = false;',
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            if (!running[i]) continue;',
+      '            if (inShot[i]) finishShot(i, batt);   // a new mark closes the previous one',
+      '            beginShot(i, now, motors[i].getVelocity(), marked, id);',
+      '            any = true;',
+      '        }',
+      '        if (any) { gradeShotId = id; gradeUntil = now + GRADE_WINDOW_S; grade = "?"; }',
+      '    }',
+      '',
+      '    private void beginShot(int i, double now, double v, boolean marked, int id) {',
+      '        inShot[i] = true; shotStart[i] = now; vAtMark[i] = v; dipMin[i] = v; recoverAt[i] = -1; shotMarked[i] = marked;',
+      '        shotId[i] = id;',
+      '        if (!marked) { gradeShotId = id; gradeUntil = now + GRADE_WINDOW_S; grade = "?"; }',
+      '        log(String.format(Locale.US, "MARK,%.3f,%d,%d,%d", now, id, i, marked ? 1 : 0));',
+      '    }',
+      '',
+      '    private void finishShot(int i, double batt) {',
+      '        inShot[i] = false;',
+      '        Shot s = new Shot();',
+      '        s.id = shotId[i]; s.motor = NAMES[i]; s.vAtMark = vAtMark[i]; s.dip = dipMin[i];',
+      '        s.recoverMs = recoverAt[i] >= 0 ? (recoverAt[i] - shotStart[i]) * 1000.0 : -1;',
+      '        s.batt = batt; s.target = target[i]; s.grade = (s.id == gradeShotId) ? grade : "?"; s.marked = shotMarked[i];',
+      '        shots.add(s);',
+      '        log(String.format(Locale.US, "S,%d,%.3f,%d,%.1f,%.1f,%.0f,%.2f,%.1f,%s,%d",',
+      '            s.id, shotStart[i], i, s.vAtMark, s.dip, s.recoverMs, s.batt, s.target, s.grade, s.marked ? 1 : 0));',
+      '    }',
+      '',
+      '    /** Per motor: made vs missed counts, mean dip and recovery for each. */',
+      '    private void summary() {',
+      '        for (int i = 0; i < NAMES.length; i++) {',
+      '            int made = 0, miss = 0; double dipMade = 0, dipMiss = 0, recMade = 0, recMiss = 0;',
+      '            for (Shot s : shots) {',
+      '                if (!s.motor.equals(NAMES[i]) || s.grade.equals("?")) continue;',
+      '                double dip = s.vAtMark - s.dip;',
+      '                if (s.grade.equals("made")) { made++; dipMade += dip; recMade += Math.max(0, s.recoverMs); }',
+      '                else { miss++; dipMiss += dip; recMiss += Math.max(0, s.recoverMs); }',
+      '            }',
+      '            if (made + miss == 0) continue;',
+      '            telemetry.addData("  " + NAMES[i], "made %d (dip %.0f, rec %.0fms)  missed %d (dip %.0f, rec %.0fms)",',
+      '                made, made > 0 ? dipMade / made : 0, made > 0 ? recMade / made : 0,',
+      '                miss, miss > 0 ? dipMiss / miss : 0, miss > 0 ? recMiss / miss : 0);',
+      '        }',
+      '    }',
+      '',
+      '    private void log(String body) {',
+      '        if (logBuffer == null || logRows >= LOG_MAX_ROWS) return;',
+      '        logBuffer.append(runId).append(\',\').append(body).append(\'\\n\');',
+      '        logRows++;',
+      '    }',
+      '',
+      '    /** Emitted once at the end, in chunks, so the control loop never waits on the logger. */',
+      '    private void flushLog() {',
+      '        if (logBuffer == null) return;',
+      '        log("END," + logRows);',
+      '        String[] all = logBuffer.toString().split("\\n");',
+      '        for (int i = 0; i < all.length; i++) {',
+      '            if (all[i].length() > 0) RobotLog.aa(LOG_TAG, all[i]);',
+      '            if ((i % 40) == 39) { try { Thread.sleep(12); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; } }',
+      '        }',
+      '        logBuffer = null;',
+      '        telemetry.addData("log", logRows + " rows — download the RC log and open it in BotBuilder\'s Shot Log viewer");',
+      '        telemetry.update();',
+      '    }',
+      '}');
+    return L.join('\n');
+  };
+
+  // ------------------------------------------------------------------
+  // Shot Log parser — reads a downloaded Robot Controller log and pulls out
+  // the ShooterTune rows. Each line in the RC log looks like
+  //   11-14 15:40:01.123  1234  5678 I BBTune: <runId>,T,12.345,0,1180.0,1200.0,1
+  // Everything after "BBTune: " is ours. Runs are keyed by runId so several
+  // sessions in one log stay separate.
+  // ------------------------------------------------------------------
+  const parseShotLog = (text) => {
+    const runs = {};
+    const tag = SHOT_LOG_TAG + ': ';
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+    String(text || '').split(/\r?\n/).forEach(line => {
+      const k = line.indexOf(tag);
+      if (k < 0) return;
+      const parts = line.slice(k + tag.length).trim().split(',');
+      if (parts.length < 2) return;
+      const [runId, kind, ...f] = parts;
+      const run = runs[runId] || (runs[runId] = { runId, motors: [], trace: [], shots: [], chars: [], pidfChanges: [], marks: [] });
+      switch (kind) {
+        case 'MOTOR': run.motors[num(f[0])] = { index: num(f[0]), name: f[1], tolerance: num(f[2]), pidf: { p: num(f[3]), i: num(f[4]), d: num(f[5]), f: num(f[6]) } }; break;
+        case 'T': run.trace.push({ t: num(f[0]), motor: num(f[1]), v: num(f[2]), target: num(f[3]) }); break;
+        case 'S': run.shots.push({ id: num(f[0]), t: num(f[1]), motor: num(f[2]), vAtMark: num(f[3]), dip: num(f[4]), recoverMs: num(f[5]), batt: num(f[6]), target: num(f[7]), grade: f[8] || '?', marked: f[9] === '1' }); break;
+        case 'CHAR': run.chars.push({ motor: num(f[0]), maxTicks: num(f[1]), f: num(f[2]), p: num(f[3]), i: num(f[4]) }); break;
+        case 'PIDF': run.pidfChanges.push({ t: num(f[0]), motor: num(f[1]), p: num(f[2]), i: num(f[3]), d: num(f[4]), f: num(f[5]) }); break;
+        case 'MARK': run.marks.push({ t: num(f[0]), id: num(f[1]), motor: num(f[2]), marked: f[3] === '1' }); break;
+        default: break;
+      }
+    });
+    // Oldest first, by runId (it is a timestamp).
+    return Object.values(runs).sort((a, b) => Number(a.runId) - Number(b.runId));
   };
 
   // ------------------------------------------------------------------
@@ -3616,7 +4080,8 @@ ${auxMotors.length > 0 ? `        // Initialize auxiliary motors (as DcMotorEx f
 ${auxMotors.map(m => `        ${javaVarName(m.name)} = hardwareMap.get(DcMotorEx.class, "${javaString(m.name)}");
         ${javaVarName(m.name)}.setDirection(DcMotorSimple.Direction.${m.reversed ? 'REVERSE' : 'FORWARD'});
         ${javaVarName(m.name)}.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.${m.zeroPower || 'FLOAT'});
-        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.${hasEncoder(m) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'});${hasEncoder(m) ? '' : '   // no encoder connected'}`).join('\n')}` : ''}
+        ${javaVarName(m.name)}.setMode(DcMotor.RunMode.${hasEncoder(m) ? 'RUN_USING_ENCODER' : 'RUN_WITHOUT_ENCODER'});${hasEncoder(m) ? '' : '   // no encoder connected'}${pidfJava(m) ? `
+        ${pidfJava(m)}` : ''}`).join('\n')}` : ''}
 
 ${servos.length > 0 ? `        // Initialize servos
 ${servos.map(s => isContinuous(s)
@@ -5703,6 +6168,42 @@ Make sure your code initializes the IMU with these orientations!
                                 ? 'RUN_USING_ENCODER — velocity control, position steps and at-speed LED available.'
                                 : 'RUN_WITHOUT_ENCODER — plain power only. Untick this if the encoder cable is not plugged in; with it ticked and no cable, the motor surges.'}
                           </span>
+                        </div>
+                      );
+                    })()}
+                    {hasEncoder(motor) && (() => {
+                      const pidf = motor.velocityPIDF || null;
+                      const setM = (patch) => setAuxMotors(auxMotors.map(m => m.id === motor.id ? { ...m, ...patch } : m));
+                      const setK = (k, v) => setM({ velocityPIDF: { p: 0, i: 0, d: 0, f: 0, ...(pidf || {}), [k]: v } });
+                      const f = motor.maxTicksPerSec > 0 ? 32767 / motor.maxTicksPerSec : null;
+                      return (
+                        <div className="mt-2 p-2 rounded border border-gray-600 bg-gray-800 text-xs space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-gray-300 font-semibold">Velocity loop</span>
+                            <span className="text-gray-400">max ticks/s</span>
+                            <input type="number" step="10" min="0" className="w-24 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white"
+                              value={motor.maxTicksPerSec ?? 0} onChange={(e) => setM({ maxTicksPerSec: parseFloat(e.target.value) || 0 })} />
+                            <span className="text-gray-500">from Shooter Tune → CHARACTERIZE (0 = not measured)</span>
+                            {f && <span className="text-gray-400">suggests F {f.toFixed(2)}, P {(0.1 * f).toFixed(2)}, I {(0.01 * f).toFixed(3)}, D 0</span>}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label className="flex items-center gap-1 text-gray-300 cursor-pointer">
+                              <input type="checkbox" checked={!!pidf}
+                                onChange={(e) => setM({ velocityPIDF: e.target.checked ? { p: f ? +(0.1 * f).toFixed(3) : 0, i: f ? +(0.01 * f).toFixed(4) : 0, d: 0, f: f ? +f.toFixed(3) : 0 } : undefined })} />
+                              Custom PIDF
+                            </label>
+                            {pidf ? ['p', 'i', 'd', 'f'].map(k => (
+                              <React.Fragment key={k}>
+                                <span className="text-gray-400 uppercase">{k}</span>
+                                <input type="number" step="0.01" className="w-20 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white"
+                                  value={pidf[k] ?? 0} onChange={(e) => setK(k, parseFloat(e.target.value) || 0)} />
+                              </React.Fragment>
+                            )) : <span className="text-gray-500">unticked = SDK defaults, nothing emitted</span>}
+                          </div>
+                          <div className="text-gray-500">
+                            Applied after <code>setMode(RUN_USING_ENCODER)</code> in TeleOp and exported to PathPilot as <code>velocityPIDF</code>.
+                            The SDK defaults are tuned for drivetrains; a flywheel usually wants F ≈ 32767 / max ticks per second.
+                          </div>
                         </div>
                       );
                     })()}
@@ -8194,6 +8695,7 @@ Make sure your code initializes the IMU with these orientations!
           : codeOutputMode === 'calibration' ? generateOdometryCalibration()
           : codeOutputMode === 'motortest' ? generateMotorTest()
           : codeOutputMode === 'sensortest' ? generateSensorTest()
+          : codeOutputMode === 'shootertune' ? generateShooterTune()
           : generateCodeSnippet();
         return (
           <div className="space-y-6">
@@ -8229,6 +8731,16 @@ Make sure your code initializes the IMU with these orientations!
                   }`}
                 >
                   Sensor Test
+                </button>
+                <button
+                  onClick={() => setCodeOutputMode('shootertune')}
+                  className={`px-3 py-1 rounded text-sm font-medium ${
+                    codeOutputMode === 'shootertune'
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
+                  }`}
+                >
+                  Shooter Tune
                 </button>
                 <button
                   onClick={() => setCodeOutputMode('calibration')}
@@ -8268,6 +8780,12 @@ Make sure your code initializes the IMU with these orientations!
                 Press A to capture a sample (three stay on screen) so two game pieces can be compared. Any rule that reads
                 a sensor shows its live YES/no verdict, using the same helper code the TeleOp runs. Colour gain here and
                 in the TeleOp are both set from the Rules tab so thresholds carry over.</p>
+              ) : codeOutputMode === 'shootertune' ? (
+                <p>🎯 <strong>Shooter Tune:</strong> Three modes. <em>CHARACTERIZE</em> runs a motor flat out until it plateaus and
+                reports max ticks/s plus the F/P/I the REV formula suggests. <em>HOLD</em> holds targets and shows error mean and
+                spread. <em>SHOT</em> runs any number of motors, you press A as each ball leaves, and it records velocity at the
+                mark, the dip, and recovery time — then Y/X/B grades it made/short/long. Everything is logged; download the
+                RC log and open it in the Shot Log viewer below.</p>
               ) : codeOutputMode === 'calibration' ? (
                 <p>🎯 <strong>Odometry Calibration:</strong> Self-contained OpMode that measures your real ticks/inch and pod offsets in five tests: port scan, straight push, two-push strafe, spin, verify. Motor names come from this configuration, so there is nothing to hand-edit. The <strong>port scan</strong> shows which ports actually move, so a mis-wired pod is visible instead of silently reading zero; the <strong>two-push strafe</strong> catches a reversed pod by checking that left and right disagree in sign.</p>
               ) : (
@@ -8314,6 +8832,171 @@ Make sure your code initializes the IMU with these orientations!
                 <p className="text-blue-300 mt-2 text-xs">Hue barely changes with distance or brightness; raw R/G/B changes a lot. If the hue min/max line swings more than ±15° on a steady piece, shade the sensor from the room lights.</p>
               </div>
             )}
+            {codeOutputMode === 'shootertune' && (<>
+              <div className="bg-blue-900 border border-blue-600 p-3 rounded-lg text-sm">
+                <h4 className="text-blue-400 font-semibold mb-2">🎯 Tuning order:</h4>
+                <ol className="text-blue-200 space-y-1 list-decimal list-inside">
+                  <li>Paste into OnBot Java as <code className="bg-blue-800 px-1 rounded">{javaClassName(robotName, 'ShooterTune')}.java</code>, Build, run with a charged battery</li>
+                  <li><strong>CHARACTERIZE</strong> each shooter (LB/RB to pick, A to run). Note max ticks/s and the current hub PIDF shown at init. If max is within ~15% of your target, the loop has no headroom — fix gearing before tuning anything</li>
+                  <li>Type max ticks/s into the Motors tab; tick <em>Custom PIDF</em> to take the suggested F/P/I. Regenerate, or edit live with X + D-pad</li>
+                  <li><strong>HOLD</strong>: Y turns a motor on. Error spread should shrink after F is right; raise P until it hunts, then back off</li>
+                  <li><strong>SHOT</strong>: run both shooters, feed with the right trigger, press A as each ball leaves, grade it Y/X/B. Twenty shots per target velocity is a usable sample</li>
+                  <li>Stop the OpMode (that flushes the log), download the Robot Controller log from the Manage page, and open it below</li>
+                </ol>
+              </div>
+              {(() => {
+                const run = shotLogRuns[shotLogRun];
+                const onFile = (file) => {
+                  if (!file) return;
+                  const r = new FileReader();
+                  r.onload = (e) => { const runs = parseShotLog(e.target.result); setShotLogRuns(runs); setShotLogRun(Math.max(0, runs.length - 1)); setShotLogMotor(-1); setShotLogName(file.name); };
+                  r.readAsText(file);
+                };
+                const COLORS = ['#60a5fa', '#f472b6', '#a78bfa', '#34d399'];
+                const GRADE = { made: '#22c55e', short: '#f59e0b', long: '#ef4444', '?': '#9ca3af' };
+                const motorsIn = run ? run.motors.filter(Boolean) : [];
+                const want = (mi) => shotLogMotor < 0 || mi === shotLogMotor;
+                const shots = run ? run.shots.filter(sh => want(sh.motor)) : [];
+                const trace = run ? run.trace.filter(tr => want(tr.motor)) : [];
+                const fmt = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : Number(v).toFixed(d);
+                // Velocity-vs-time chart
+                const W = 640, H = 220, PL = 48, PR = 10, PT = 10, PB = 24;
+                const chart = (() => {
+                  if (!trace.length) return null;
+                  const t0 = Math.min(...trace.map(p => p.t)), t1 = Math.max(...trace.map(p => p.t));
+                  const vs = trace.map(p => p.v).concat(trace.map(p => p.target));
+                  const vMin = Math.min(...vs), vMax = Math.max(...vs);
+                  const y0 = Math.max(0, vMin - 0.1 * (vMax - vMin || 100)), y1 = vMax + 0.05 * (vMax - vMin || 100);
+                  const X = (t) => PL + (t - t0) / ((t1 - t0) || 1) * (W - PL - PR);
+                  const Y = (v) => PT + (1 - (v - y0) / ((y1 - y0) || 1)) * (H - PT - PB);
+                  const byMotor = {};
+                  trace.forEach(p => (byMotor[p.motor] = byMotor[p.motor] || []).push(p));
+                  const paths = Object.entries(byMotor).map(([mi, pts]) => {
+                    const step = Math.max(1, Math.floor(pts.length / 1500));
+                    const sampled = pts.filter((_, k) => k % step === 0);
+                    const d = sampled.map((p, k) => `${k ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
+                    const dt = sampled.map((p, k) => `${k ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.target).toFixed(1)}`).join('');
+                    const c = COLORS[Number(mi) % COLORS.length];
+                    return <g key={mi}><path d={dt} stroke={c} strokeDasharray="4 3" strokeWidth="1" fill="none" opacity="0.6" /><path d={d} stroke={c} strokeWidth="1.2" fill="none" /></g>;
+                  });
+                  const ticks = 5;
+                  return (
+                    <svg width={W} height={H} className="bg-gray-900 rounded w-full" viewBox={`0 0 ${W} ${H}`}>
+                      {Array.from({ length: ticks + 1 }, (_, k) => y0 + (y1 - y0) * k / ticks).map((v, k) => (
+                        <g key={k}><line x1={PL} x2={W - PR} y1={Y(v)} y2={Y(v)} stroke="#374151" strokeWidth="1" /><text x={PL - 4} y={Y(v) + 3} fontSize="9" fill="#9ca3af" textAnchor="end">{v.toFixed(0)}</text></g>
+                      ))}
+                      {shots.map(sh => (
+                        <g key={sh.id + '-' + sh.motor}>
+                          <line x1={X(sh.t)} x2={X(sh.t)} y1={PT} y2={H - PB} stroke={GRADE[sh.grade] || GRADE['?']} strokeWidth={sh.marked ? 1.5 : 1} strokeDasharray={sh.marked ? '' : '2 2'} opacity="0.8" />
+                          <text x={X(sh.t) + 2} y={PT + 9} fontSize="8" fill={GRADE[sh.grade] || GRADE['?']}>{sh.id}</text>
+                        </g>
+                      ))}
+                      {paths}
+                      <text x={W - PR} y={H - 6} fontSize="9" fill="#9ca3af" textAnchor="end">{(t1 - t0).toFixed(0)} s</text>
+                      <text x={PL} y={H - 6} fontSize="9" fill="#9ca3af">ticks/s vs time · dashed = target · lines = shots (green made, amber short, red long, grey ungraded; dotted = unmarked droop)</text>
+                    </svg>
+                  );
+                })();
+                // Dip vs recovery scatter
+                const scatter = (() => {
+                  const pts = shots.filter(sh => sh.recoverMs !== null && sh.recoverMs >= 0);
+                  if (!pts.length) return null;
+                  const SW = 320, SH = 220, sPL = 44, sPB = 28;
+                  const dips = pts.map(sh => sh.vAtMark - sh.dip), recs = pts.map(sh => sh.recoverMs);
+                  const dMax = Math.max(1, ...dips), rMax = Math.max(1, ...recs);
+                  const X = (d) => sPL + d / dMax * (SW - sPL - 10);
+                  const Y = (r) => 10 + (1 - r / rMax) * (SH - 10 - sPB);
+                  return (
+                    <svg width={SW} height={SH} className="bg-gray-900 rounded" viewBox={`0 0 ${SW} ${SH}`}>
+                      <line x1={sPL} x2={SW - 10} y1={SH - sPB} y2={SH - sPB} stroke="#4b5563" /><line x1={sPL} x2={sPL} y1={10} y2={SH - sPB} stroke="#4b5563" />
+                      {pts.map((sh, k) => (
+                        <g key={k}>
+                          {sh.marked
+                            ? <circle cx={X(sh.vAtMark - sh.dip)} cy={Y(sh.recoverMs)} r="4" fill={GRADE[sh.grade] || GRADE['?']} opacity="0.85" />
+                            : <rect x={X(sh.vAtMark - sh.dip) - 3.5} y={Y(sh.recoverMs) - 3.5} width="7" height="7" fill={GRADE[sh.grade] || GRADE['?']} opacity="0.85" />}
+                        </g>
+                      ))}
+                      <text x={SW / 2} y={SH - 8} fontSize="9" fill="#9ca3af" textAnchor="middle">dip depth, ticks/s (max {dMax.toFixed(0)})</text>
+                      <text x={12} y={SH / 2} fontSize="9" fill="#9ca3af" textAnchor="middle" transform={`rotate(-90, 12, ${SH / 2})`}>recovery ms (max {rMax.toFixed(0)})</text>
+                    </svg>
+                  );
+                })();
+                // Verdict per motor
+                const verdict = motorsIn.filter(m => want(m.index)).map(m => {
+                  const mine = run.shots.filter(sh => sh.motor === m.index && sh.grade !== '?');
+                  const made = mine.filter(sh => sh.grade === 'made'), miss = mine.filter(sh => sh.grade !== 'made');
+                  const avg = (arr, f) => arr.length ? arr.reduce((a, sh) => a + f(sh), 0) / arr.length : null;
+                  const dip = (sh) => sh.vAtMark - sh.dip, rec = (sh) => Math.max(0, sh.recoverMs || 0);
+                  const ch = run.chars.filter(c => c.motor === m.index).slice(-1)[0];
+                  return { m, made, miss, dipMade: avg(made, dip), dipMiss: avg(miss, dip), recMade: avg(made, rec), recMiss: avg(miss, rec), vMade: avg(made, sh => sh.vAtMark), vMiss: avg(miss, sh => sh.vAtMark), ch };
+                });
+                return (
+                  <div className="bg-gray-800 border border-gray-600 p-3 rounded-lg text-sm space-y-3">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h4 className="text-green-400 font-semibold">📈 Shot Log viewer</h4>
+                      <label className="bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded text-sm cursor-pointer">
+                        Open RC log…
+                        <input type="file" accept=".txt,.log,text/plain" className="hidden" onChange={(e) => onFile(e.target.files && e.target.files[0])} />
+                      </label>
+                      {shotLogName && <span className="text-xs text-gray-400">{shotLogName} — {shotLogRuns.length} run(s)</span>}
+                      {shotLogRuns.length > 1 && (
+                        <select className="bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm" value={shotLogRun} onChange={(e) => setShotLogRun(parseInt(e.target.value, 10))}>
+                          {shotLogRuns.map((r, k) => <option key={r.runId} value={k}>run {k + 1} — {new Date(Number(r.runId)).toLocaleString()} ({r.shots.length} shots)</option>)}
+                        </select>
+                      )}
+                      {run && motorsIn.length > 1 && (
+                        <select className="bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm" value={shotLogMotor} onChange={(e) => setShotLogMotor(parseInt(e.target.value, 10))}>
+                          <option value={-1}>all motors</option>
+                          {motorsIn.map(m => <option key={m.index} value={m.index}>{m.name}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    {!run ? (
+                      <p className="text-gray-400 text-xs">Download the Robot Controller log (Manage page → Download Logs) after a Shooter Tune session and open it here. Lines tagged <code>{SHOT_LOG_TAG}</code> are read; everything else is ignored.</p>
+                    ) : (
+                      <>
+                        {verdict.map(v => (
+                          <div key={v.m.index} className="text-xs text-gray-300 bg-gray-900 rounded p-2">
+                            <span className="font-semibold text-white">{v.m.name}</span>
+                            {' '}— hub PIDF at start P {fmt(v.m.pidf.p, 3)} I {fmt(v.m.pidf.i, 3)} D {fmt(v.m.pidf.d, 3)} F {fmt(v.m.pidf.f, 3)}
+                            {v.ch && <> · characterised max <strong>{fmt(v.ch.maxTicks)}</strong> ticks/s → suggest F {fmt(v.ch.f, 3)} P {fmt(v.ch.p, 3)} I {fmt(v.ch.i, 4)}</>}
+                            <br />
+                            made <strong>{v.made.length}</strong> (v@mark {fmt(v.vMade)}, dip {fmt(v.dipMade)}, recover {fmt(v.recMade)} ms) ·
+                            missed <strong>{v.miss.length}</strong> (v@mark {fmt(v.vMiss)}, dip {fmt(v.dipMiss)}, recover {fmt(v.recMiss)} ms)
+                            {v.made.length >= 3 && v.miss.length >= 3 && (
+                              <span className={`ml-2 ${(v.dipMiss > v.dipMade * 1.3 || v.recMiss > v.recMade * 1.3) ? 'text-amber-300' : 'text-green-300'}`}>
+                                {(v.dipMiss > v.dipMade * 1.3 || v.recMiss > v.recMade * 1.3)
+                                  ? '→ misses dip deeper / recover slower: velocity recovery is the problem; tune F then P, and lengthen the feed interval past the made-shot recovery time'
+                                  : '→ misses look like made shots on velocity: the loop is not the cause; look at the piece, chute or aim'}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                        {chart}
+                        <div className="flex flex-wrap gap-3 items-start">
+                          {scatter}
+                          <div className="flex-1 min-w-[16rem] max-h-56 overflow-y-auto">
+                            <table className="w-full text-xs text-gray-300">
+                              <thead><tr className="text-gray-400 text-left"><th>#</th><th>motor</th><th>t</th><th>target</th><th>v@mark</th><th>dip</th><th>recover</th><th>batt</th><th>grade</th></tr></thead>
+                              <tbody>
+                                {shots.map((sh, k) => (
+                                  <tr key={k} className="border-t border-gray-700">
+                                    <td>{sh.id}{sh.marked ? '' : '*'}</td><td>{(run.motors[sh.motor] || {}).name || sh.motor}</td><td>{fmt(sh.t, 1)}</td><td>{fmt(sh.target)}</td>
+                                    <td>{fmt(sh.vAtMark)}</td><td>{fmt(sh.vAtMark - sh.dip)}</td><td>{sh.recoverMs >= 0 ? fmt(sh.recoverMs) + ' ms' : 'never'}</td><td>{fmt(sh.batt, 1)}</td>
+                                    <td style={{ color: GRADE[sh.grade] || GRADE['?'] }}>{sh.grade}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            <div className="text-xs text-gray-500 mt-1">* = droop detected without a mark. "never" = did not get back inside tolerance within 6 s.</div>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+            </>)}
             {codeOutputMode === 'calibration' && (
               <div className="bg-green-900 border border-green-600 p-3 rounded-lg text-sm">
                 <h4 className="text-green-400 font-semibold mb-2">🎯 Running the calibration:</h4>
