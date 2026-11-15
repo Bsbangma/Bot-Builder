@@ -1794,9 +1794,14 @@ const FTCRobotConfigurator = () => {
           body.push(`${javaVarName(st.motorName)}.setMode(DcMotor.RunMode.RUN_TO_POSITION);`);
           body.push(`${javaVarName(st.motorName)}.setPower(${st.motorPower !== undefined ? st.motorPower : 0.8});`);
           body.push('macroTimer.reset();');
-          body.push(`while (opModeIsActive() && ${st.motorName}.isBusy() && macroTimer.seconds() < 4.0) idle();`);
+          body.push(`while (opModeIsActive() && ${javaVarName(st.motorName)}.isBusy() && macroTimer.seconds() < 4.0) idle();`);
           body.push(`${javaVarName(st.motorName)}.setPower(0);`);
           body.push(`${javaVarName(st.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
+          {
+            // A genuine mode change, so tuned coefficients must be put back.
+            const pm = (auxMotors || []).find(x => x.name === st.motorName);
+            if (pm && pidfJava(pm)) body.push(pidfJava(pm));
+          }
           estSeconds += 1.2;
           break;
         case 'motor_on':
@@ -1825,12 +1830,13 @@ const FTCRobotConfigurator = () => {
             // usually a drive leg — is happening. A later motor_until_velocity
             // on the same motor (with wait) is the safety net before feeding.
             body.push(`// set velocity ${tgt} ticks/sec and continue without waiting for it`);
-            body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
             body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
             break;
           }
+          // No setMode here: the motor was put in RUN_USING_ENCODER at init, and
+          // a velocity step on a motor without an encoder is rejected before we
+          // get here. Re-issuing setMode risks resetting tuned PIDF coefficients.
           body.push(`// closed-loop: hold ${tgt} ticks/sec, proceed once within ${tol}`);
-          body.push(`${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);`);
           body.push(`${v}.setVelocity(${tgt.toFixed(1)});`);
           body.push('macroTimer.reset();');
           body.push(`while (opModeIsActive() && Math.abs(${v}.getVelocity() - ${tgt.toFixed(1)}) > ${tol.toFixed(1)}`);
@@ -4344,7 +4350,7 @@ ${isHold ?
                             macroStepStarted = true;
                         }
                         if (!${javaVarName(step.motorName)}.isBusy()) {
-                            ${javaVarName(step.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+                            ${javaVarName(step.motorName)}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);${(() => { const pm = (auxMotors || []).find(x => x.name === step.motorName); return pm && pidfJava(pm) ? `\n                            ${pidfJava(pm)}` : ''; })()}
                             macroStep++;
                             macroStepStarted = false;
                         }
@@ -4358,7 +4364,6 @@ ${isHold ?
         if (step.noWait) {
           macroCode += `                        // Set the velocity and move on at once; the wheel spins up while
                         // the following steps run. The motor keeps holding it afterwards.
-                        ${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
                         ${v}.setVelocity(${tgt.toFixed(1)});
                         macroStep++;
                         break;
@@ -4370,8 +4375,9 @@ ${isHold ?
                         // the one asked for regardless of battery voltage — unlike setPower,
                         // where 0.5 is a different speed every match. This step used to drive
                         // by power and treat the target only as a wait threshold.
+                        // No setMode: it was set at init, and re-issuing it can reset tuned
+                        // PIDF coefficients.
                         if (!macroStepStarted) {
-                            ${v}.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
                             ${v}.setVelocity(${tgt.toFixed(1)});
                             macroTimer.reset();
                             macroStepStarted = true;
