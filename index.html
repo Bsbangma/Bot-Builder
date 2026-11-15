@@ -1390,14 +1390,20 @@ const FTCRobotConfigurator = () => {
         message: `${what} is bound to gamepad 2, but this robot is configured for one controller. It will never respond. Change it to gamepad 1, or set two controllers in the Controls tab.` }));
     }
 
-    // A latching motor that also has a direct control will be stomped every loop.
+    // A latching motor that also has a direct control will be stomped every
+    // loop — in TeleOp. Every direct control (hold, trigger, and toggle alike)
+    // writes its motor on every iteration, so the latch lasts one loop. A
+    // PathPilot-only macro generates no TeleOp code and has no such loop, so
+    // it is not affected; a macro that is both TeleOp-triggered and exported
+    // to PathPilot is affected only on the TeleOp side.
     (macros || []).forEach(m => {
+      if (m.triggerType === 'pathpilot') return;
       (m.steps || []).forEach(st => {
         if (st.type !== 'motor_on' || !st.motorName) return;
         const c = motorControls[st.motorName];
         if (c && c.control && c.control !== 'none') {
           warnings.push({ type: 'error',
-            message: `Macro "${m.name}" latches "${st.motorName}" on, but that motor also has a direct control in the Controls tab. The control writes to it every loop and will immediately turn it back off. Set its control to "Not directly controlled".` });
+            message: `Macro "${m.name}" latches "${st.motorName}" on, but in TeleOp that motor also has a direct control in the Controls tab, which writes to it every loop and will turn it back off one loop later.${m.pathpilotEnabled ? ' (The PathPilot export of this macro is fine — autonomous has no direct controls.)' : ''} Set its control to "Not directly controlled", or drive it from the control instead of the macro.` });
         }
       });
     });
