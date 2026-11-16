@@ -656,6 +656,11 @@ const FTCRobotConfigurator = () => {
     // REV Sensors
     rev_color_v3: { name: 'REV Color Sensor V3', brand: 'REV', type: 'color', interface: 'i2c',
       javaType: 'ColorSensor', importPath: 'com.qualcomm.robotcore.hardware.ColorSensor' },
+    // AndyMark am-5636 (AMS TMD3725). Reads through the same ColorSensor /
+    // NormalizedColorSensor / DistanceSensor interfaces as the REV V3, so hue
+    // rules, gain and the Sensor Test work unchanged. Proximity to ~200 mm.
+    andymark_color: { name: 'AndyMark Color Sensor (am-5636)', brand: 'AndyMark', type: 'color', interface: 'i2c',
+      javaType: 'ColorSensor', importPath: 'com.qualcomm.robotcore.hardware.ColorSensor' },
     rev_2m_distance: { name: 'REV 2M Distance Sensor', brand: 'REV', type: 'distance', interface: 'i2c',
       javaType: 'DistanceSensor', importPath: 'com.qualcomm.robotcore.hardware.DistanceSensor' },
     rev_touch: { name: 'REV Touch Sensor', brand: 'REV', type: 'touch', interface: 'digital',
