@@ -3968,6 +3968,102 @@ ${sensors.map(s => {
       && ledReadyPattern && ledSpinUpPattern && ledIdlePattern;
     const ledConst = (n) => `BLINKIN_${String(n).toUpperCase().replace(/\s+/g, '_')}`;
 
+    // ---- Rules: conditions before the controls, actions after ----
+    //
+    // Conditions are evaluated BEFORE the driver's controls so a control can
+    // see that a rule is overriding its device this loop and not write to it
+    // at all. Writing and then having the rule overwrite a millisecond later
+    // is not the same thing: the hub forwards both, and a servo or motor gets
+    // a sliver of the first command every loop — a CR servo told "run" then
+    // "stop" fifty times a second creeps. Actions still run AFTER the
+    // controls, so a rule's value is the last word on anything it touches.
+    const RULE_IND = '                ';
+    const ruleList = activeRules();
+    const velNames = velocityMotors.map(m => m.name);
+    const ruleMeta = ruleList.map((r, i) => {
+      const n = i + 1;
+      const acts = ruleActions(r), elses = ruleElseActions(r);
+      const plainActs = acts.filter(a => a.type !== 'start_macro'), macroActs = acts.filter(a => a.type === 'start_macro');
+      const plainElses = elses.filter(a => a.type !== 'start_macro'), macroElses = elses.filter(a => a.type === 'start_macro');
+      const edge = macroActs.length > 0 || macroElses.length > 0;
+      const condList = (r.conditions || []).map(ruleConditionJava).filter(Boolean);
+      return { r, n, acts, elses, plainActs, macroActs, plainElses, macroElses, edge, condList, latch: r.mode === 'latch' };
+    });
+    // Which rules override a given motor/servo (by configured name), and when:
+    // THEN actions while rule<N>On, ELSE actions while !rule<N>On.
+    const ruleOverrideExpr = (deviceName) => {
+      const terms = [];
+      ruleMeta.forEach(({ n, plainActs, plainElses }) => {
+        if (plainActs.some(a => a.motor === deviceName || a.servo === deviceName)) terms.push(`rule${n}On`);
+        if (plainElses.some(a => a.motor === deviceName || a.servo === deviceName)) terms.push(`!rule${n}On`);
+      });
+      return terms.length ? terms.join(' || ') : null;
+    };
+    // Wraps a control's code so it is skipped while a rule has the device.
+    const gateByRules = (deviceName, code) => {
+      const expr = ruleOverrideExpr(deviceName);
+      if (!expr) return code;
+      return `        if (!(${expr})) {   // a rule has ${deviceName} this loop; see RULES below\n` +
+        code.split('\n').map(l => l.length ? '    ' + l : l).join('\n') +
+        `\n        }`;
+    };
+    const rulesConditionsJava = ruleList.length === 0 ? '' : `
+            // === RULE CONDITIONS ===
+            //
+            // Evaluated here, ahead of the driver's controls, so a control whose
+            // motor or servo a rule is overriding this loop can stay silent
+            // instead of writing a value the rule would overwrite a moment
+            // later. The actions themselves run after the controls (RULES
+            // below). "while" rules act only on loops where the condition
+            // holds; "latch" rules stay on once triggered until START.
+${ruleMeta.map(({ r, n, edge, condList, latch }) => {
+      const cond = condList.join('\n' + RULE_IND + '&& ');
+      const trig = condList[0];
+      const decide = condList.length > 1 ? condList.slice(1).join('\n' + RULE_IND + '&& ') : 'true';
+      return `            // Rule ${n}: ${r.name}
+${edge ? `            boolean rule${n}Trigger = ${trig};
+            boolean rule${n}Decision = ${decide};
+            boolean rule${n}Rose = rule${n}Trigger && !rule${n}Prev;
+            rule${n}Prev = rule${n}Trigger;
+            boolean rule${n}Holds = rule${n}Trigger && rule${n}Decision;` : `            boolean rule${n}Holds = ${cond};`}
+${latch ? `            if (gamepad1.start || gamepad2.start) rule${n}On = false;
+            if (rule${n}Holds) rule${n}On = true;` : `            rule${n}On = rule${n}Holds;`}`;
+    }).join('\n')}
+`;
+    const rulesActionsJava = ruleList.length === 0 ? '' : (() => {
+      const anyLed = ruleMeta.some(({ acts, elses }) => [...acts, ...elses].some(a => a.type === 'led'));
+      const body = (list) => list.flatMap(a => ruleActionJava(a, velNames) || []).map(l => RULE_IND + '    ' + l).join('\n')
+        + (list.some(a => a.type === 'led') ? `\n${RULE_IND}    ruleLed = true;` : '');
+      return `
+            // === RULES ===
+            //
+            // After the driver's controls, outside the driver-control block, and
+            // before the status LED. A rule runs last on whatever it touches, so
+            // its decision stands — that is what a rule is for. It also keeps
+            // running while a macro has the drivetrain: a sensor guard should
+            // not switch off because the robot is driving itself.
+            //
+            // A rule that starts a macro fires on the loop its trigger (the
+            // first condition) becomes true, with the remaining conditions as
+            // the decision between THEN and ELSE — "press A: if the tag is
+            // visible shoot, otherwise reposition".
+${anyLed ? '            boolean ruleLed = false;   // a rule set the LED this loop; the status LED yields\n' : ''}${ruleMeta.map(({ r, n, plainActs, macroActs, plainElses, macroElses }) => `            // Rule ${n}: ${r.name}
+            {${plainActs.length ? `
+                if (rule${n}On) {
+${body(plainActs)}
+                }` : ''}${macroActs.length ? `
+                if (rule${n}Rose && rule${n}Decision) {   // once per press
+${body(macroActs)}
+                }` : ''}${plainElses.length ? `
+                if (!rule${n}On) {   // ELSE
+${body(plainElses)}
+                }` : ''}${macroElses.length ? `
+                if (rule${n}Rose && !rule${n}Decision) {   // ELSE: trigger fired, decision false
+${body(macroElses)}
+                }` : ''}
+            }`).join('\n')}`;
+    })();
+
     return `package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
@@ -4625,7 +4721,7 @@ ${robotOrientedButton !== 'none' ? `${macros.length > 0 && robotOrientedButton =
             // not a field one. Do not "fix" this to match — the transform below
             // is built for this convention.
             double heading = imu.getRobotYawPitchRollAngles().getYaw(AngleUnit.RADIANS) - headingOffset;
-
+${rulesConditionsJava}
             // === DRIVE CONTROLS ===
 ${macros.length > 0 ? (() => {
   // Only a macro that actually steers should take the drivetrain. A macro that
@@ -4743,76 +4839,11 @@ ${dl.right.map(n => `            ${n}.setPower(rightPower);`).join('\n')}
 `;
 })()}
 ${auxMotors.length > 0 ? `            // === AUXILIARY MOTOR CONTROLS ===
-${auxMotors.map(m => generateMotorControlCode(m)).join('\n\n')}` : ''}
+${auxMotors.map(m => gateByRules(m.name, generateMotorControlCode(m))).join('\n\n')}` : ''}
 
 ${servos.length > 0 ? `            // === SERVO CONTROLS ===
-${servos.map(s => generateServoControlCode(s)).join('\n\n')}` : ''}
-${macros.length > 0 ? `            } // End of driver-control block` : ''}${activeRules().length > 0 ? (() => {
-  const velNames = velocityMotors.map(m => m.name);
-  const anyLed = activeRules().some(r => [...ruleActions(r), ...ruleElseActions(r)].some(a => a.type === 'led'));
-  const ind = '                ';
-  return `
-            // === RULES ===
-            //
-            // After the driver's controls, outside the driver-control block, and
-            // before the status LED. A rule runs last on whatever it touches, so
-            // its decision stands — that is what a rule is for. It also keeps
-            // running while a macro has the drivetrain: a sensor guard should
-            // not switch off because the robot is driving itself.
-            //
-            // "while" rules act only on loops where the condition holds; the
-            // ordinary controls take the motor back the moment it clears.
-            // "latch" rules stay on once triggered until START is pressed —
-            // the same button that cancels a macro, so one press always hands
-            // the robot back to the driver.
-${anyLed ? '            boolean ruleLed = false;   // a rule set the LED this loop; the status LED yields\n' : ''}${activeRules().map((r, i) => {
-    const n = i + 1;
-    const cond = (r.conditions || []).map(ruleConditionJava).filter(Boolean).join('\n' + ind + '    && ');
-    const latch = r.mode === 'latch';
-    const acts = ruleActions(r), elses = ruleElseActions(r);
-    // Statements for a list of actions, with the LED flag once if any is an LED.
-    const body = (list) => list.flatMap(a => ruleActionJava(a, velNames) || []).map(l => ind + '    ' + l).join('\n')
-      + (list.some(a => a.type === 'led') ? `\n${ind}    ruleLed = true;` : '');
-    const plainActs = acts.filter(a => a.type !== 'start_macro'), macroActs = acts.filter(a => a.type === 'start_macro');
-    const plainElses = elses.filter(a => a.type !== 'start_macro'), macroElses = elses.filter(a => a.type === 'start_macro');
-    // A rule that starts a macro fires on the loop its condition becomes true,
-    // not on every loop it stays true — otherwise a hold-style macro that ends
-    // on release would restart the instant it finished.
-    //
-    // For those, the FIRST condition is the trigger (usually a button) and any
-    // further conditions are the decision: THEN runs when the trigger rises
-    // with the decision true, ELSE when it rises with the decision false. That
-    // is what "press A: if the tag is visible shoot, otherwise reposition"
-    // means, and a plain else-on-false would start the ELSE macro every loop
-    // the button sat idle.
-    const edge = macroActs.length > 0 || macroElses.length > 0;
-    const condList = (r.conditions || []).map(ruleConditionJava).filter(Boolean);
-    const trig = condList[0];
-    const decide = condList.length > 1 ? condList.slice(1).join('\n' + ind + '    && ') : 'true';
-    return `            // Rule ${n}: ${r.name}
-            {
-${edge ? `                boolean trigger = ${trig};
-                boolean decision = ${decide};
-                boolean rule${n}Rose = trigger && !rule${n}Prev;
-                rule${n}Prev = trigger;
-                boolean holds = trigger && decision;` : `                boolean holds = ${cond};`}
-${latch ? `                if (gamepad1.start || gamepad2.start) rule${n}On = false;
-                if (holds) rule${n}On = true;` : `                rule${n}On = holds;`}${plainActs.length ? `
-                if (rule${n}On) {
-${body(plainActs)}
-                }` : ''}${macroActs.length ? `
-                if (rule${n}Rose && decision) {   // once per press
-${body(macroActs)}
-                }` : ''}${plainElses.length ? `
-                if (!rule${n}On) {   // ELSE
-${body(plainElses)}
-                }` : ''}${macroElses.length ? `
-                if (rule${n}Rose && !decision) {   // ELSE: trigger fired, decision false
-${body(macroElses)}
-                }` : ''}
-            }`;
-  }).join('\n')}`;
-})() : ''}
+${servos.map(s => gateByRules(s.name, generateServoControlCode(s))).join('\n\n')}` : ''}
+${macros.length > 0 ? `            } // End of driver-control block` : ''}${rulesActionsJava}
 ${velocityMotors.length > 0 ? `
             // === AT-SPEED TRACKING ===
             //
