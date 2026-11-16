@@ -944,7 +944,7 @@ const FTCRobotConfigurator = () => {
   // Actions (a rule holds a list: actions[], elseActions[]; the older single
   // action / elseAction fields are still read):
   //   motor_power { motor, power }   motor_velocity { motor, velocity }
-  //   motor_stop  { motor }          servo_position { servo, position }
+  //   motor_stop  { motor }          servo_position { servo, position }   servo_power { servo, power }  (CR servo)
   //   led         { pattern }        start_macro    { macroId }
   // ------------------------------------------------------------------
   const RULE_COLOR_CHAR = { red: 'R', green: 'G', blue: 'B', any: 'A', none: 'A' };
@@ -1103,8 +1103,14 @@ const FTCRobotConfigurator = () => {
         return [...(isVel(a.motor) ? [`${v}Target = 0;`] : []), `${v}.setPower(0);`];
       }
       case 'servo_position': {
-        if (!(servos || []).some(s => s.name === a.servo)) return null;
+        const sv = (servos || []).find(s => s.name === a.servo);
+        if (!sv || isContinuous(sv)) return null;   // a CR servo has no position
         return [`${javaVarName(a.servo)}.setPosition(${num(a.position, 0.5)});`];
+      }
+      case 'servo_power': {
+        const sv = (servos || []).find(s => s.name === a.servo);
+        if (!sv || !isContinuous(sv)) return null;  // only a CR servo takes power
+        return [`${javaVarName(a.servo)}.setPower(${num(a.power, 0)});`];
       }
       case 'led': {
         if (!hasBlinkin || !(blinkinPatterns || []).some(p => p.name === a.pattern)) return null;
@@ -1155,6 +1161,14 @@ const FTCRobotConfigurator = () => {
       if (a.type === 'motor_velocity') {
         const m = (auxMotors || []).find(x => x.name === a.motor);
         if (m && !hasEncoder(m)) return `${label} sets a velocity on "${a.motor}", which has no encoder`;
+      }
+      if (a.type === 'servo_position') {
+        const sv = (servos || []).find(x => x.name === a.servo);
+        if (sv && isContinuous(sv)) return `${label} sets a position on "${a.servo}", a continuous servo — use "set servo power" (0 = stop)`;
+      }
+      if (a.type === 'servo_power') {
+        const sv = (servos || []).find(x => x.name === a.servo);
+        if (sv && !isContinuous(sv)) return `${label} sets power on "${a.servo}", a positional servo — use "set servo position"`;
       }
       if (a.type === 'start_macro') {
         const idx = (macros || []).findIndex(m => String(m.id) === String(a.macroId));
@@ -8327,7 +8341,8 @@ Make sure your code initializes the IMU with these orientations!
             case 'motor_power': return { type, motor: auxMotors[0]?.name || '', power: 0.5 };
             case 'motor_velocity': return { type, motor: encoderMotors[0]?.name || '', velocity: 1000 };
             case 'motor_stop': return { type, motor: auxMotors[0]?.name || '' };
-            case 'servo_position': return { type, servo: servos[0]?.name || '', position: 0.5 };
+            case 'servo_position': return { type, servo: (servos.find(x => !isContinuous(x)) || {}).name || '', position: 0.5 };
+            case 'servo_power': return { type, servo: (servos.find(x => isContinuous(x)) || {}).name || '', power: 0 };
             case 'led': return { type, pattern: blinkinPatterns[0]?.name || '' };
             case 'start_macro': return { type, macroId: teleopMacros[0] ? teleopMacros[0].m.id : '' };
             default: return { type };
@@ -8473,6 +8488,7 @@ Make sure your code initializes the IMU with these orientations!
                 <option value="motor_velocity">set motor velocity</option>
                 <option value="motor_stop">stop motor</option>
                 <option value="servo_position">set servo position</option>
+                <option value="servo_power">set servo power (continuous)</option>
                 <option value="led">set LED pattern</option>
                 <option value="start_macro">start macro</option>
               </select>
@@ -8501,9 +8517,17 @@ Make sure your code initializes the IMU with these orientations!
                 <input type="number" step="50" className={inp} value={a.velocity} onChange={(e) => upd({ velocity: parseFloat(e.target.value) })} />
                 <span className="text-xs text-gray-400">ticks/s</span>
               </>)}
+              {a.type === 'servo_power' && (<>
+                <select className={sel} value={a.servo || ''} onChange={(e) => upd({ servo: e.target.value })}>
+                  {opts(servos.filter(x => isContinuous(x)), a.servo, '(no continuous servo in the Servos tab)')}
+                </select>
+                <span className="text-xs text-gray-400">power</span>
+                <input type="number" step="0.1" min="-1" max="1" className={inp} value={a.power ?? 0} onChange={(e) => upd({ power: parseFloat(e.target.value) })} />
+                <span className="text-xs text-gray-400">(0 = stop, − = reverse)</span>
+              </>)}
               {a.type === 'servo_position' && (<>
                 <select className={sel} value={a.servo || ''} onChange={(e) => upd({ servo: e.target.value })}>
-                  {opts(servos, a.servo, '(no servos in the Servos tab)')}
+                  {opts(servos.filter(x => !isContinuous(x)), a.servo, '(no positional servo in the Servos tab)')}
                 </select>
                 <input type="number" step="0.05" min="0" max="1" className={inp} value={a.position} onChange={(e) => upd({ position: parseFloat(e.target.value) })} />
               </>)}
