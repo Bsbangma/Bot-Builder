@@ -234,6 +234,12 @@ const FTCRobotConfigurator = () => {
   // execute the lateral component the transform produces. The toggle flips
   // between modes without touching heading; Options re-zeroes heading and
   // forces field-oriented back on, which is the recovery when the IMU drifts.
+  // Driver aim-assist (Limelight). While the button is held and the target is
+  // in view, the bearing correction takes over rotation; the driver keeps
+  // forward and strafe. Not a macro: nothing takes the drivetrain.
+  const [aimAssistButton, setAimAssistButton] = React.useState('none');
+  const [aimAssistTarget, setAimAssistTarget] = React.useState('');
+  const [aimBearingOffsetDeg, setAimBearingOffsetDeg] = React.useState(0);
   const [robotOrientedButton, setRobotOrientedButton] = React.useState('none');
 
   const [slowModeButton, setSlowModeButton] = React.useState('none');
@@ -754,31 +760,77 @@ const FTCRobotConfigurator = () => {
     '     * requireUpright drops members whose roll is past 90 degrees. Hive cells',
     '     * pivot, and a flipped cell is not one you can score in — but a wall tag',
     '     * has no such state, so single-tag targets pass false.',
+    '     *',
+    '     * Three things keep the result from jumping, which is what made the',
+    '     * approach lurch:',
+    '     *   - a member joins the average only after TAG_JOIN_FRAMES consecutive',
+    '     *     sightings, so a tag flickering at the edge of view does not move it;',
+    '     *   - the result is low-pass filtered (TAG_FILTER), so a member leaving',
+    '     *     shifts it over a few frames rather than at once;',
+    '     *   - a dropout shorter than TAG_HOLD_MS returns the last filtered pose',
+    '     *     instead of null, so one blurred frame does not stop the robot.',
     '     */',
     '    private double[] seeTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright) {',
     '        if (limelight == null) return null;',
-    '        LLResult result = limelight.getLatestResult();',
-    '        if (result == null || !result.isValid()) return null;',
-    '        List<LLResultTypes.FiducialResult> detections = result.getFiducialResults();',
-    '        if (detections == null) return null;',
+    '        long now = System.currentTimeMillis();',
     '        double sx = 0, sz = 0;',
     '        int n = 0;',
-    '        for (LLResultTypes.FiducialResult d : detections) {',
-    '            int slot = -1;',
-    '            for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }',
-    '            if (slot < 0) continue;',
-    '            Pose3D pose = d.getTargetPoseCameraSpace();',
-    '            if (pose == null) continue;',
-    '            if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;',
-    '            double ox = slot < offXIn.length ? offXIn[slot] : 0;',
-    '            double oz = slot < offZIn.length ? offZIn[slot] : 0;',
-    '            sx += pose.getPosition().x * 39.3701 + ox;',
-    '            sz += pose.getPosition().z * 39.3701 + oz;',
-    '            n++;',
+    '        boolean[] seenThisFrame = new boolean[ids.length];',
+    '        LLResult result = limelight.getLatestResult();',
+    '        List<LLResultTypes.FiducialResult> detections = (result != null && result.isValid()) ? result.getFiducialResults() : null;',
+    '        if (detections != null) {',
+    '            for (LLResultTypes.FiducialResult d : detections) {',
+    '                int slot = -1;',
+    '                for (int i = 0; i < ids.length; i++) if (ids[i] == d.getFiducialId()) { slot = i; break; }',
+    '                if (slot < 0) continue;',
+    '                Pose3D pose = d.getTargetPoseCameraSpace();',
+    '                if (pose == null) continue;',
+    '                if (requireUpright && Math.abs(pose.getOrientation().getRoll(AngleUnit.DEGREES)) >= 90) continue;',
+    '                seenThisFrame[slot] = true;',
+    '                int id = d.getFiducialId();',
+    '                if (id >= 0 && id < tagSeenFrames.length) tagSeenFrames[id]++;',
+    '                if (id >= 0 && id < tagSeenFrames.length && tagSeenFrames[id] < TAG_JOIN_FRAMES) continue;   // not yet trusted',
+    '                double ox = slot < offXIn.length ? offXIn[slot] : 0;',
+    '                double oz = slot < offZIn.length ? offZIn[slot] : 0;',
+    '                sx += pose.getPosition().x * 39.3701 + ox;',
+    '                sz += pose.getPosition().z * 39.3701 + oz;',
+    '                n++;',
+    '            }',
     '        }',
-    '        if (n == 0) return null;',
-    '        return new double[] { sx / n, sz / n };',
+    '        // A member not seen this frame starts over.',
+    '        for (int i = 0; i < ids.length; i++) if (!seenThisFrame[i] && ids[i] >= 0 && ids[i] < tagSeenFrames.length) tagSeenFrames[ids[i]] = 0;',
+    '        if (n == 0) {',
+    '            if (tagPoseFilt != null && now - tagLastSeenMs <= TAG_HOLD_MS) return tagPoseFilt;   // brief dropout: coast on the last pose',
+    '            tagPoseFilt = null;',
+    '            return null;',
+    '        }',
+    '        double x = sx / n, z = sz / n;',
+    '        if (tagPoseFilt == null || now - tagLastSeenMs > TAG_HOLD_MS) tagPoseFilt = new double[] { x, z };',
+    '        else {',
+    '            tagPoseFilt[0] += TAG_FILTER * (x - tagPoseFilt[0]);',
+    '            tagPoseFilt[1] += TAG_FILTER * (z - tagPoseFilt[1]);',
+    '        }',
+    '        tagLastSeenMs = now;',
+    '        return tagPoseFilt;',
     '    }',
+  ];
+  // State and tuning the helper above needs. TeleOp declares these as fields;
+  // the profile ships them (javaHelpers.tagFields) so PathPilot can paste them.
+  const TAG_FIELDS_JAVA = [
+    '    // AprilTag approach smoothing (see seeTarget / stepTowardTarget).',
+    '    private static final int TAG_JOIN_FRAMES = 3;        // sightings before a tag counts',
+    '    private static final double TAG_FILTER = 0.5;        // 0..1, higher = less smoothing',
+    '    private static final long TAG_HOLD_MS = 250;         // coast on the last pose this long',
+    '    private static final long TAG_SETTLE_MS = 200;       // inside tolerance this long = arrived',
+    '    private static final double TAG_RAMP_PER_S = 2.0;    // max change in drive command per second',
+    '    private static final double TAG_MIN_POWER = 0.08;    // enough to move; below this the robot stalls and twitches',
+    '    private static final double TAG_SLOW_IN = 12.0;      // start lowering the power cap inside this range, inches',
+    '    private static final double TAG_SLOW_FLOOR = 0.25;   // the cap at zero range',
+    '    private final int[] tagSeenFrames = new int[600];',
+    '    private double[] tagPoseFilt = null;',
+    '    private long tagLastSeenMs = 0;',
+    '    private double tagFwdCmd = 0, tagStrafeCmd = 0, tagTurnCmd = 0;',
+    '    private long tagLastStepMs = 0, tagInsideSinceMs = -1;',
   ];
   // Visibility-only wrapper, used by Rules. Emitted in TeleOp only when a rule
   // needs it, so a robot without tag rules generates exactly what it did before.
@@ -1338,6 +1390,10 @@ const FTCRobotConfigurator = () => {
       }
     });
 
+    if (hasLimelight && aimAssistButton && aimAssistButton !== 'none' && !resolveTagTarget({ target: aimAssistTarget })) {
+      warnings.push({ type: 'error', message: 'Aim assist has a button but no target. Pick a hive cell or tag on the Tags tab, or set the button to None.' });
+    }
+
     // Rules. A rule that cannot be generated is skipped with a comment in the
     // code; say so here too, where it is easier to see.
     (rules || []).forEach((r, i) => {
@@ -1483,6 +1539,7 @@ const FTCRobotConfigurator = () => {
       if (resetHeadingButton && resetHeadingButton !== 'none') claims.push([resetHeadingButton, 'reset heading', dPad]);
       if (slowModeButton && slowModeButton !== 'none') claims.push([slowModeButton, 'slow mode', dPad]);
       if (robotOrientedButton && robotOrientedButton !== 'none') claims.push([robotOrientedButton, 'robot-oriented toggle', dPad]);
+      if (hasLimelight && aimAssistButton && aimAssistButton !== 'none') claims.push([aimAssistButton, 'aim assist', dPad]);
       (macros || []).forEach(m => {
         // PathPilot-only macros claim no button, so they cannot collide.
         if (m.triggerType === 'button' || m.triggerType === 'combo')
@@ -1601,6 +1658,7 @@ const FTCRobotConfigurator = () => {
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, driveLimitEnabled, driveMaxPower, driveRampMs,
+      aimAssistButton, aimAssistTarget, aimBearingOffsetDeg,
       robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
@@ -1709,6 +1767,9 @@ const FTCRobotConfigurator = () => {
     setDriveLimitEnabled(!!config.driveLimitEnabled);
     setDriveMaxPower(numOr(config.driveMaxPower, 0.8));
     setDriveRampMs(numOr(config.driveRampMs, 150));
+    setAimAssistButton(config.aimAssistButton || 'none');
+    setAimAssistTarget(config.aimAssistTarget || '');
+    setAimBearingOffsetDeg(numOr(config.aimBearingOffsetDeg, 0));
     setRobotOrientedButton(config.robotOrientedButton || 'none');
     setMotorControls(config.motorControls || {});
     setRules(Array.isArray(config.rules) ? config.rules : []);
@@ -1763,6 +1824,7 @@ const FTCRobotConfigurator = () => {
       numControllers, gamepad1Role, gamepad2Role,
       driveForwardBack, driveStrafe, driveRotate, resetHeadingButton,
       slowModeButton, slowModeSpeed, driveLimitEnabled, driveMaxPower, driveRampMs,
+      aimAssistButton, aimAssistTarget, aimBearingOffsetDeg,
       robotOrientedButton, motorControls, servoControls,
       telemetryHeading, telemetryAprilTag, telemetryDriveMotors, telemetryAuxMotors,
       telemetryServos, telemetryDistanceSensors, telemetryColorSensors,
@@ -2160,11 +2222,12 @@ const FTCRobotConfigurator = () => {
       })),
       // Java PathPilot can paste verbatim. seeTarget/targetVisible need the
       // Limelight field plus the cluster constants in `clusterJava`.
+      aimAssist: (hasLimelight && aimAssistButton && aimAssistButton !== 'none') ? { button: aimAssistButton, target: aimAssistTarget, bearingOffsetDeg: Number(aimBearingOffsetDeg) || 0 } : null,
       javaHelpers: {
         ...(rulesNeedColor() ? { seesColor: RULE_SEES_COLOR_JAVA } : {}),
         ...(rulesNeedHue() ? { seesHue: RULE_SEES_HUE_JAVA } : {}),
         ...(rulesNeedRgb() ? { seesRgb: RULE_SEES_RGB_JAVA } : {}),
-        ...(hasLimelight ? { seeTarget: [...SEE_TARGET_JAVA, '', ...TARGET_VISIBLE_JAVA], clusterJava: clusterConstantsJava() } : {})
+        ...(hasLimelight ? { seeTarget: [...SEE_TARGET_JAVA, '', ...TARGET_VISIBLE_JAVA], tagFields: TAG_FIELDS_JAVA, clusterJava: clusterConstantsJava() } : {})
       },
       warnings: profileWarnings
     };
@@ -4142,6 +4205,11 @@ ${hasLimelight ? `    // AprilTag approach tuning. Conservative starting values 
     private static final double TAG_MAX_POWER = 0.45;
     private static final double TAG_ANGLE_TOLERANCE = 3.0;
     private static final double TAG_SEEK_TIMEOUT = 4.0;   // s before giving up
+${TAG_FIELDS_JAVA.join('\n')}
+${(aimAssistButton && aimAssistButton !== 'none' && resolveTagTarget({ target: aimAssistTarget })) ? `
+    // Driver aim-assist (Tags tab). Offset = shooter line minus camera line, degrees.
+    private static final double AIM_BEARING_OFFSET_DEG = ${Number(aimBearingOffsetDeg) || 0};
+    private boolean aimLocked = false, aimSeen = false;` : ''}
 
 ${clusterConstantsJava().join('\n')}
 ` : ''}
@@ -4634,12 +4702,13 @@ ${isHold ?
       case 'drive_to_tag': {
         // stepIsRunnable already guaranteed this resolves.
         const tgt = resolveTagTarget(step);
-        macroCode += `                        // Drive to ${tgt.kind === 'cluster' ? 'cell cluster "' + tgt.name + '" (tags ' + tgt.ids.join(',') + ')' : 'AprilTag ' + tgt.ids[0]}: ${step.distance} in away, offset ${step.offset} in
+        macroCode += `                        // Drive to ${tgt.kind === 'cluster' ? 'cell cluster "' + tgt.name + '" (tags ' + tgt.ids.join(',') + ')' : 'AprilTag ' + tgt.ids[0]}: ${step.holdDistance === false ? 'any distance' : step.distance + ' in away'}, ${step.holdOffset === false ? 'any offset' : 'offset ' + step.offset + ' in'}${step.holdDistance === false && step.holdOffset === false ? ' (aim only)' : ''}
                         if (!macroStepStarted) {
                             macroTimer.reset();
+                            tagResetApproach();
                             macroStepStarted = true;
                         }
-                        if (stepTowardTarget(${tgt.javaIds}, ${tgt.kind === 'cluster' ? 'CLUSTER_OFF_X_IN, CLUSTER_OFF_Z_IN, true' : 'NO_OFFSETS, NO_OFFSETS, false'}, ${step.distance}, ${step.offset}, ${step.tolerance})) {
+                        if (stepTowardTarget(${tgt.javaIds}, ${tgt.kind === 'cluster' ? 'CLUSTER_OFF_X_IN, CLUSTER_OFF_Z_IN, true' : 'NO_OFFSETS, NO_OFFSETS, false'}, ${step.holdDistance === false ? 'Double.NaN' : step.distance}, ${step.holdOffset === false ? 'Double.NaN' : step.offset}, ${step.tolerance})) {
                             macroStep++;
                             macroStepStarted = false;
                         } else if (macroTimer.seconds() >= TAG_SEEK_TIMEOUT) {
@@ -4759,7 +4828,33 @@ ${slowModeButton !== 'none' ? `            // Slow mode
             double speedMultiplier = ${getButtonCode(slowModeButton, driverGamepad)} ? ${slowModeSpeed} : 1.0;
             forward *= speedMultiplier;
             strafe *= speedMultiplier;
-            rotate *= speedMultiplier;` : ''}
+            rotate *= speedMultiplier;` : ''}${(() => {
+  const aimOn = hasLimelight && aimAssistButton && aimAssistButton !== 'none' && driveLayout().kind === 'mecanum';
+  const tgt = aimOn ? resolveTagTarget({ target: aimAssistTarget }) : null;
+  if (!aimOn || !tgt) return '';
+  return `
+
+            // === AIM ASSIST ===
+            //
+            // While the driver holds the button and the target is in view, the
+            // bearing correction takes over rotation and the sticks keep forward
+            // and strafe. A drive modifier, not a macro: nothing takes the
+            // drivetrain, nothing "arrives", release and it is ordinary driving.
+            // AIM_BEARING_OFFSET_DEG is the angle between the camera's centre line
+            // and the shooter's — measure it once by lining up a shot that goes in.
+            aimLocked = false;
+            if (${getButtonCode(aimAssistButton, driverGamepad)}) {
+                double[] aim = seeTarget(${tgt.javaIds}, NO_OFFSETS, NO_OFFSETS, ${tgt.upright});
+                if (aim != null) {
+                    double bearing = Math.toDegrees(Math.atan2(aim[0], aim[1])) - AIM_BEARING_OFFSET_DEG;
+                    aimLocked = Math.abs(bearing) <= TAG_ANGLE_TOLERANCE;
+                    rotate = aimLocked ? 0 : clamp(bearing * TAG_TURN_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
+                    aimSeen = true;
+                } else {
+                    aimSeen = false;
+                }
+            }`;
+})()}
 ${driveLimitEnabled ? `
             // Drive power limiting — see DRIVE_MAX_POWER / DRIVE_RAMP_SEC above.
             //
@@ -4910,7 +5005,8 @@ ${macros.length > 0 ? `            if (activeMacro != -1) {
                 telemetry.addData("MACRO", "${macros.map((m, i) => m.triggerType === 'pathpilot' ? '' : `" + (activeMacro == ${i} ? "${javaString(m.name)} Step " + macroStep : "") + "`).join('')}");
             }` : ''}
 ${telemetryHeading ? `            telemetry.addData("H", "%.1f°", Math.toDegrees(heading));` : ''}
-${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}
+${(driveLayout().kind === 'mecanum' && robotOrientedButton !== 'none') ? `            telemetry.addData("Drive", fieldOriented ? "FIELD oriented" : "ROBOT oriented");` : ''}${(hasLimelight && aimAssistButton && aimAssistButton !== 'none' && driveLayout().kind === 'mecanum' && resolveTagTarget({ target: aimAssistTarget })) ? `
+            telemetry.addData("Aim", ${getButtonCode(aimAssistButton, driverGamepad)} ? (aimLocked ? "LOCKED" : (aimSeen ? "turning" : "no target")) : "off");` : ''}
 ${activeRules().length > 0 ? `            telemetry.addData("Rules", "${activeRules().map(r => `${javaString(r.name)}:%s`).join(' ')}", ${activeRules().map((r, i) => `rule${i + 1}On ? "ON" : "-"`).join(', ')});
 ` : ''}${telemetryAprilTag ? (hasLimelight ? `            {
                 // One line: which target is visible, how far, and how far off centre.
@@ -5030,31 +5126,79 @@ ${rulesNeedTag() ? '\n' + TARGET_VISIBLE_JAVA.join('\n') + '\n' : ''}
      *
      * offsetInches shifts the target sideways: negative left, positive right.
      */
+    /** Call when a tag step begins so the filter and the ramp start fresh. */
+    private void tagResetApproach() {
+        tagPoseFilt = null;
+        tagFwdCmd = 0; tagStrafeCmd = 0; tagTurnCmd = 0;
+        tagLastStepMs = 0; tagInsideSinceMs = -1;
+        java.util.Arrays.fill(tagSeenFrames, 0);
+    }
+
+    /**
+     * One loop of driving toward the target. True once arrived.
+     *
+     * targetInches / offsetInches may be Double.NaN to mean "don't care" on
+     * that axis: no command on it, and it does not gate arrival. Both NaN is
+     * aim-only — rotate in place until the bearing is inside tolerance.
+     *
+     * Each axis stops commanding once inside its own tolerance (so one axis
+     * at the edge cannot start and stop the whole robot), arrival needs all
+     * active axes inside for TAG_SETTLE_MS, the command is slew-limited and
+     * has a floor, and the power cap shrinks over the last TAG_SLOW_IN inches
+     * so the Limelight's latency cannot carry the robot past the target.
+     */
     private boolean stepTowardTarget(int[] ids, double[] offXIn, double[] offZIn, boolean requireUpright,
                                      double targetInches, double offsetInches, double toleranceInches) {
         double[] p = seeTarget(ids, offXIn, offZIn, requireUpright);
+        long now = System.currentTimeMillis();
         if (p == null) {
+            tagFwdCmd = 0; tagStrafeCmd = 0; tagTurnCmd = 0;
+            tagInsideSinceMs = -1;
             stopDrive();
             return false;
         }
         double xIn = p[0];
         double zIn = p[1];
+        boolean holdRange = !Double.isNaN(targetInches);
+        boolean holdLateral = !Double.isNaN(offsetInches);
 
-        double rangeError = zIn - targetInches;
-        double lateralError = xIn - offsetInches;
+        double rangeError = holdRange ? zIn - targetInches : 0;
+        double lateralError = holdLateral ? xIn - offsetInches : 0;
         double bearingError = Math.toDegrees(Math.atan2(xIn, zIn));
 
-        if (Math.abs(rangeError) <= toleranceInches
-                && Math.abs(lateralError) <= toleranceInches
-                && Math.abs(bearingError) <= TAG_ANGLE_TOLERANCE) {
-            stopDrive();
-            return true;
-        }
+        boolean rangeOk = !holdRange || Math.abs(rangeError) <= toleranceInches;
+        boolean lateralOk = !holdLateral || Math.abs(lateralError) <= toleranceInches;
+        boolean bearingOk = Math.abs(bearingError) <= TAG_ANGLE_TOLERANCE;
 
-        double forward = clamp(rangeError * TAG_DRIVE_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
-        double strafe = clamp(lateralError * TAG_STRAFE_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
-        double turn = clamp(bearingError * TAG_TURN_GAIN, -TAG_MAX_POWER, TAG_MAX_POWER);
-        setDrivePowers(forward, strafe, turn);
+        if (rangeOk && lateralOk && bearingOk) {
+            if (tagInsideSinceMs < 0) tagInsideSinceMs = now;
+            stopDrive();
+            tagFwdCmd = 0; tagStrafeCmd = 0; tagTurnCmd = 0;
+            return now - tagInsideSinceMs >= TAG_SETTLE_MS;
+        }
+        tagInsideSinceMs = -1;
+
+        // Power cap shrinks as the (active) range closes.
+        double remaining = holdRange ? Math.abs(rangeError) : TAG_SLOW_IN;
+        double cap = TAG_MAX_POWER;
+        if (remaining < TAG_SLOW_IN) cap = TAG_SLOW_FLOOR + (TAG_MAX_POWER - TAG_SLOW_FLOOR) * (remaining / TAG_SLOW_IN);
+
+        double wantFwd = rangeOk ? 0 : clamp(rangeError * TAG_DRIVE_GAIN, -cap, cap);
+        double wantStrafe = lateralOk ? 0 : clamp(lateralError * TAG_STRAFE_GAIN, -cap, cap);
+        double wantTurn = bearingOk ? 0 : clamp(bearingError * TAG_TURN_GAIN, -cap, cap);
+        if (wantFwd != 0 && Math.abs(wantFwd) < TAG_MIN_POWER) wantFwd = Math.copySign(TAG_MIN_POWER, wantFwd);
+        if (wantStrafe != 0 && Math.abs(wantStrafe) < TAG_MIN_POWER) wantStrafe = Math.copySign(TAG_MIN_POWER, wantStrafe);
+        if (wantTurn != 0 && Math.abs(wantTurn) < TAG_MIN_POWER) wantTurn = Math.copySign(TAG_MIN_POWER, wantTurn);
+
+        // Slew limit, so a dropout or a membership change cannot become a jolt.
+        double dt = tagLastStepMs == 0 ? 0.02 : Math.min(0.25, (now - tagLastStepMs) / 1000.0);
+        tagLastStepMs = now;
+        double maxStep = TAG_RAMP_PER_S * dt;
+        tagFwdCmd += clamp(wantFwd - tagFwdCmd, -maxStep, maxStep);
+        tagStrafeCmd += clamp(wantStrafe - tagStrafeCmd, -maxStep, maxStep);
+        tagTurnCmd += clamp(wantTurn - tagTurnCmd, -maxStep, maxStep);
+
+        setDrivePowers(tagFwdCmd, tagStrafeCmd, tagTurnCmd);
         return false;
     }
 
@@ -7649,21 +7793,29 @@ Make sure your code initializes the IMU with these orientations!
                     })()}
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400">Distance (in)</label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+                      <input type="checkbox" checked={step.holdDistance !== false} onChange={(e) => updateStep(macro.id, step.id, 'holdDistance', e.target.checked)} />
+                      Distance (in)
+                    </label>
                     <input
                       type="number"
                       value={step.distance}
+                      disabled={step.holdDistance === false}
                       onChange={(e) => updateStep(macro.id, step.id, 'distance', parseFloat(e.target.value))}
-                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                      className={`w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm ${step.holdDistance === false ? 'opacity-40' : ''}`}
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400">Offset (- left, + right)</label>
+                    <label className="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+                      <input type="checkbox" checked={step.holdOffset !== false} onChange={(e) => updateStep(macro.id, step.id, 'holdOffset', e.target.checked)} />
+                      Offset (- left, + right)
+                    </label>
                     <input
                       type="number"
                       value={step.offset}
+                      disabled={step.holdOffset === false}
                       onChange={(e) => updateStep(macro.id, step.id, 'offset', parseFloat(e.target.value))}
-                      className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
+                      className={`w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm ${step.holdOffset === false ? 'opacity-40' : ''}`}
                     />
                   </div>
                   <div>
@@ -7675,6 +7827,11 @@ Make sure your code initializes the IMU with these orientations!
                       onChange={(e) => updateStep(macro.id, step.id, 'tolerance', parseFloat(e.target.value))}
                       className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
                     />
+                  </div>
+                  <div className="col-span-4 text-xs text-gray-400">
+                    Untick an axis to leave it alone: the step does not drive on it and does not wait for it.
+                    Both unticked = <strong>aim only</strong> — turn in place until the target is centred (±3°), from wherever the robot is.
+                    The approach is filtered and ramped, and arrival needs 0.2 s inside tolerance, so it no longer stops and starts near the end.
                   </div>
                 </div>
               );
@@ -9578,6 +9735,41 @@ Make sure your code initializes the IMU with these orientations!
                 <span className="text-gray-400 text-sm">({(aprilTagSize / 25.4).toFixed(2)} inches)</span>
               </div>
               <p className="text-xs text-gray-400 mt-2">Configure this in Limelight web interface</p>
+            </div>
+
+            <div className="bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-blue-400 mb-2">Driver Aim Assist</h4>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <label className="text-gray-300">Button (driver pad)</label>
+                <select value={aimAssistButton} onChange={(e) => setAimAssistButton(e.target.value)}
+                  className="bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm">
+                  <option value="none">None (off)</option>
+                  {[['a','A'],['b','B'],['x','X'],['y','Y'],['left_bumper','Left Bumper'],['right_bumper','Right Bumper'],['left_trigger','Left Trigger'],['right_trigger','Right Trigger'],['dpad_up','D-pad Up'],['dpad_down','D-pad Down'],['dpad_left','D-pad Left'],['dpad_right','D-pad Right'],['left_stick_button','Left Stick Click'],['right_stick_button','Right Stick Click'],['back','Back / Share']].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+                <label className="text-gray-300">Target</label>
+                <select value={aimAssistTarget} onChange={(e) => setAimAssistTarget(e.target.value)}
+                  className="bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm">
+                  <option value="">— pick —</option>
+                  {(clusters || []).length > 0 && (
+                    <optgroup label="Hive cells">
+                      {clusters.map(c => <option key={`c${c.id}`} value={`cluster:${c.id}`}>{c.name} — {c.alliance === 'B' ? 'blue' : 'red'}</option>)}
+                    </optgroup>
+                  )}
+                  <optgroup label="Single tags">
+                    {(targetTags || []).map(t => <option key={`t${t.id}`} value={`tag:${t.tagId}`}>{t.name} (ID {t.tagId})</option>)}
+                  </optgroup>
+                </select>
+                <label className="text-gray-300">Shooter offset</label>
+                <input type="number" step="0.5" value={aimBearingOffsetDeg} onChange={(e) => setAimBearingOffsetDeg(parseFloat(e.target.value) || 0)}
+                  className="w-20 bg-gray-600 border border-gray-500 rounded px-2 py-1 text-white text-sm" />
+                <span className="text-gray-400">°</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">
+                Hold the button while driving: the robot turns to face the target and keeps facing it, the sticks still drive forward and sideways.
+                Release and it is normal driving. Shooter offset is the angle between where the camera looks and where the shooter fires — start at 0,
+                aim at the cell, shoot; if the ball goes left of centre, make the offset more negative, right more positive, until it goes in. Mecanum drive and Limelight only.
+                {!hasLimelight && <span className="text-red-300"> The Limelight is off in the Limelight tab, so this generates nothing.</span>}
+              </p>
             </div>
 
             <div className="bg-gray-700 p-4 rounded-lg">
